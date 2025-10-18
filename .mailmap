@@ -1,0 +1,4 @@
+# Map Copilot bot commits to the actual user
+# Format: Proper Name <proper@email.com> <commit@email.com>
+spacee <ecren.talasli@gmail.com> <198982749+Copilot@users.noreply.github.com>
+spacee <ecren.talasli@gmail.com> copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>
