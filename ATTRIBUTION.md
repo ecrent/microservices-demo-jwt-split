@@ -8,12 +8,6 @@ This project is based on **Google Cloud Platform's microservices-demo**:
 - **License**: Apache License 2.0
 - **Original Purpose**: Demonstration of cloud-native microservices architecture and Google Cloud Platform services
 
-## Academic Modifications
-
-This repository has been modified and extended for a **Master's Thesis** research project focusing on:
-
-**Research Topic**: JWT Compression Optimization in Microservices Architectures using HTTP/2 HPACK
-
 **Key Research Contributions**:
 1. Implementation of JWT compression using split headers (x-jwt-static, x-jwt-session, x-jwt-dynamic-bin, x-jwt-sig-bin)
 2. Comparative performance analysis of compressed vs. uncompressed JWT tokens
