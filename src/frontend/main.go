@@ -234,7 +234,7 @@ func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second*3)
 	defer cancel()
 	
-	// Chain unary interceptors: JWT first, then OTel
+	// Chain unary interceptors: Retry wraps everything
 	unaryChain := func(
 		ctx context.Context,
 		method string,
@@ -243,16 +243,24 @@ func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
-		// First apply JWT interceptor
-		jwtInterceptor := jwtUnaryClientInterceptor()
-		return jwtInterceptor(ctx, method, req, reply, cc, func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, opts ...grpc.CallOption) error {
-			// Then apply OTel interceptor
-			otelInterceptor := otelgrpc.UnaryClientInterceptor()
-			return otelInterceptor(ctx, method, req, reply, cc, invoker, opts...)
+		// Retry interceptor wraps all others
+		retryInterceptor := retryUnaryClientInterceptor()
+		return retryInterceptor(ctx, method, req, reply, cc, func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+			// Error injection
+			errorInjectionInterceptor := errorInjectionUnaryClientInterceptor()
+			return errorInjectionInterceptor(ctx, method, req, reply, cc, func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+				// JWT
+				jwtInterceptor := jwtUnaryClientInterceptor()
+				return jwtInterceptor(ctx, method, req, reply, cc, func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+					// OTel
+					otelInterceptor := otelgrpc.UnaryClientInterceptor()
+					return otelInterceptor(ctx, method, req, reply, cc, invoker, opts...)
+				}, opts...)
+			}, opts...)
 		}, opts...)
 	}
 	
-	// Chain stream interceptors: JWT first, then OTel
+	// Chain stream interceptors: Error Injection first (optional), then JWT, then OTel
 	streamChain := func(
 		ctx context.Context,
 		desc *grpc.StreamDesc,
@@ -261,12 +269,16 @@ func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
 		streamer grpc.Streamer,
 		opts ...grpc.CallOption,
 	) (grpc.ClientStream, error) {
-		// First apply JWT interceptor
-		jwtInterceptor := jwtStreamClientInterceptor()
-		return jwtInterceptor(ctx, desc, cc, method, func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-			// Then apply OTel interceptor
-			otelInterceptor := otelgrpc.StreamClientInterceptor()
-			return otelInterceptor(ctx, desc, cc, method, streamer, opts...)
+		// First apply error injection interceptor (if enabled)
+		errorInjectionInterceptor := errorInjectionStreamClientInterceptor()
+		return errorInjectionInterceptor(ctx, desc, cc, method, func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			// Then apply JWT interceptor
+			jwtInterceptor := jwtStreamClientInterceptor()
+			return jwtInterceptor(ctx, desc, cc, method, func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+				// Finally apply OTel interceptor
+				otelInterceptor := otelgrpc.StreamClientInterceptor()
+				return otelInterceptor(ctx, desc, cc, method, streamer, opts...)
+			}, opts...)
 		}, opts...)
 	}
 	
