@@ -37,6 +37,9 @@ The following tools should already be available in your Github Codespace:
 ```bash
 minikube start
 ```
+```bash
+minikube ssh "sudo apt-get update && sudo apt-get install -y tcpdump"
+```
 
 Enable JWT compression across all services:
 
