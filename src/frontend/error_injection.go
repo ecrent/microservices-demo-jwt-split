@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -39,11 +40,18 @@ type ErrorInjectionConfig struct {
 var (
 	errorInjectionConfig *ErrorInjectionConfig
 	randSource           *rand.Rand
+	errInjLog            *logrus.Logger // Dedicated logger for error injection
 )
 
 func init() {
 	// Initialize random source with current time for true randomness
 	randSource = rand.New(rand.NewSource(time.Now().UnixNano()))
+	// Don't load config here - will be done explicitly after logger is ready
+}
+
+// InitErrorInjection initializes error injection with the provided logger
+func InitErrorInjection(logger *logrus.Logger) {
+	errInjLog = logger
 	errorInjectionConfig = loadErrorInjectionConfig()
 }
 
@@ -59,9 +67,9 @@ func loadErrorInjectionConfig() *ErrorInjectionConfig {
 	// Check if error injection is enabled
 	if os.Getenv("ENABLE_ERROR_INJECTION") == "true" {
 		config.Enabled = true
-		log.Info("[ERROR-INJECTION] Error injection is ENABLED")
+		errInjLog.Info("[ERROR-INJECTION] Error injection is ENABLED")
 	} else {
-		log.Info("[ERROR-INJECTION] Error injection is DISABLED")
+		errInjLog.Info("[ERROR-INJECTION] Error injection is DISABLED")
 		return config
 	}
 
@@ -71,11 +79,11 @@ func loadErrorInjectionConfig() *ErrorInjectionConfig {
 			if rate >= 0.0 && rate <= 1.0 {
 				config.ErrorRate = rate
 			} else {
-				log.Warnf("[ERROR-INJECTION] Invalid error rate %f, using default 0.1", rate)
+				errInjLog.Warnf("[ERROR-INJECTION] Invalid error rate %f, using default 0.1", rate)
 				config.ErrorRate = 0.1
 			}
 		} else {
-			log.Warnf("[ERROR-INJECTION] Failed to parse error rate: %v, using default 0.1", err)
+			errInjLog.Warnf("[ERROR-INJECTION] Failed to parse error rate: %v, using default 0.1", err)
 			config.ErrorRate = 0.1
 		}
 	} else {
@@ -92,7 +100,7 @@ func loadErrorInjectionConfig() *ErrorInjectionConfig {
 		config.TargetService = target
 	}
 
-	log.Infof("[ERROR-INJECTION] Configuration loaded - Rate: %.1f%%, Type: %s, Target: %s",
+	errInjLog.Infof("[ERROR-INJECTION] Configuration loaded - Rate: %.1f%%, Type: %s, Target: %s",
 		config.ErrorRate*100, config.ErrorType, config.TargetService)
 
 	return config
@@ -147,24 +155,24 @@ func getInjectedError(method string) error {
 	var err error
 	switch errorType {
 	case "unavailable":
-		err = status.Error(codes.Unavailable, "simulated service unavailable (error injection)")
+		err = status.Error(codes.Unavailable, "INJECTED_ERROR: simulated service unavailable (error injection)")
 	case "timeout":
 		// Simulate timeout by sleeping then returning deadline exceeded
 		time.Sleep(100 * time.Millisecond)
-		err = status.Error(codes.DeadlineExceeded, "simulated timeout (error injection)")
+		err = status.Error(codes.DeadlineExceeded, "INJECTED_ERROR: simulated timeout (error injection)")
 	case "internal":
-		err = status.Error(codes.Internal, "simulated internal error (error injection)")
+		err = status.Error(codes.Internal, "INJECTED_ERROR: simulated internal error (error injection)")
 	case "deadline_exceeded":
-		err = status.Error(codes.DeadlineExceeded, "simulated deadline exceeded (error injection)")
+		err = status.Error(codes.DeadlineExceeded, "INJECTED_ERROR: simulated deadline exceeded (error injection)")
 	case "connection_refused":
-		err = status.Error(codes.Unavailable, "simulated connection refused (error injection)")
+		err = status.Error(codes.Unavailable, "INJECTED_ERROR: simulated connection refused (error injection)")
 	case "packet_loss":
-		err = status.Error(codes.Unavailable, "simulated packet loss (error injection)")
+		err = status.Error(codes.Unavailable, "INJECTED_ERROR: simulated packet loss (error injection)")
 	default:
-		err = status.Error(codes.Unavailable, fmt.Sprintf("simulated error type: %s (error injection)", errorType))
+		err = status.Error(codes.Unavailable, fmt.Sprintf("INJECTED_ERROR: simulated error type: %s (error injection)", errorType))
 	}
 
-	log.Warnf("[ERROR-INJECTION] 🔴 Injecting %s error for method: %s", errorType, method)
+	errInjLog.Warnf("[ERROR-INJECTION] 🔴 Injecting %s error for method: %s", errorType, method)
 	return err
 }
 

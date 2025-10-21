@@ -144,6 +144,9 @@ func main() {
 	}
 	log.Info("RSA keys loaded successfully")
 
+	// Initialize error injection
+	InitErrorInjection(log)
+
 	mustConnGRPC(ctx, &svc.currencySvcConn, svc.currencySvcAddr)
 	mustConnGRPC(ctx, &svc.productCatalogSvcConn, svc.productCatalogSvcAddr)
 	mustConnGRPC(ctx, &svc.cartSvcConn, svc.cartSvcAddr)

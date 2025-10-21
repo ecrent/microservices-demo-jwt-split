@@ -29,14 +29,21 @@ else
 fi
 
 echo ""
-echo "Running test requests to cart service (20 requests)..."
+echo "Running test requests to cart service (100 requests)..."
 echo ""
 
 SUCCESS_COUNT=0
 ERROR_COUNT=0
 INJECTED_ERROR_COUNT=0
 
-for i in {1..20}; do
+# Get frontend pod name for live log monitoring
+FRONTEND_POD=$(kubectl get pods -l app=frontend -o jsonpath='{.items[0].metadata.name}')
+
+# Start tailing logs in background to capture retry and error injection activity
+kubectl logs -f $FRONTEND_POD --tail=0 2>/dev/null | grep -E "ERROR-INJECTION|RETRY" > /tmp/test_logs.txt &
+LOG_TAIL_PID=$!
+
+for i in {1..100}; do
     RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:8080/cart \
         -d "product_id=OLJCESPC7Z&quantity=1" \
         -H "Content-Type: application/x-www-form-urlencoded" \
@@ -45,44 +52,89 @@ for i in {1..20}; do
     
     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
     
-    if [ "$HTTP_CODE" = "303" ] || [ "$HTTP_CODE" = "200" ]; then
+    if [ "$HTTP_CODE" = "303" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "200" ]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
         echo "  Request $i: ✓ Success (HTTP $HTTP_CODE)"
     else
         ERROR_COUNT=$((ERROR_COUNT + 1))
         echo "  Request $i: ✗ Failed (HTTP $HTTP_CODE)"
+        if [ "$HTTP_CODE" = "500" ]; then
+            echo "             ^ Likely an injected error that exhausted all retries"
+        fi
     fi
     
     # Small delay between requests
     sleep 0.1
 done
 
-echo ""
+# Stop log tailing
+kill $LOG_TAIL_PID 2>/dev/null || true
+sleep 1
+
 echo "======================================================================"
 echo "  Test Results"
 echo "======================================================================"
 echo ""
-echo "Total Requests:   20"
+echo "Total Requests:   100"
 echo "Successful:       $SUCCESS_COUNT"
 echo "Failed:           $ERROR_COUNT"
-echo "Success Rate:     $(echo "scale=1; $SUCCESS_COUNT * 100 / 20" | bc)%"
-echo "Failure Rate:     $(echo "scale=1; $ERROR_COUNT * 100 / 20" | bc)%"
+echo "Success Rate:     $((SUCCESS_COUNT * 100 / 100))%"
+echo "Failure Rate:     $((ERROR_COUNT * 100 / 100))%"
 echo ""
 
 # Check frontend logs for error injection messages
-echo "Checking frontend logs for error injection activity..."
-echo ""
-FRONTEND_POD=$(kubectl get pods -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-INJECTION_LOGS=$(kubectl logs $FRONTEND_POD --tail=100 | grep -c "ERROR-INJECTION" || echo "0")
-
-echo "Found $INJECTION_LOGS error injection log entries in frontend pod"
+echo "Analyzing error injection and retry activity..."
 echo ""
 
-if [ $ERROR_COUNT -gt 0 ]; then
-    echo "✓ Error injection appears to be working!"
+# Count error injections and retries from logs
+ERROR_INJECTION_COUNT=$(kubectl logs $FRONTEND_POD --tail=500 | grep -c "ERROR-INJECTION.*Injecting" || echo "0")
+RETRY_COUNT=$(kubectl logs $FRONTEND_POD --tail=500 | grep -c "RETRY.*Attempt" || echo "0")
+
+echo "Error Injections:  $ERROR_INJECTION_COUNT (errors injected)"
+echo "Retry Attempts:    $RETRY_COUNT (retries triggered)"
+echo ""
+
+if [ -f /tmp/test_logs.txt ]; then
+    LIVE_ERROR_COUNT=$(grep -c "ERROR-INJECTION" /tmp/test_logs.txt || echo "0")
+    LIVE_RETRY_COUNT=$(grep -c "RETRY" /tmp/test_logs.txt || echo "0")
+    echo "During test run:"
+    echo "  - Error injections detected: $LIVE_ERROR_COUNT"
+    echo "  - Retry attempts detected:   $LIVE_RETRY_COUNT"
     echo ""
-    echo "Sample error injection logs:"
-    kubectl logs $FRONTEND_POD --tail=50 | grep "ERROR-INJECTION" | tail -5
+fi
+
+if [ $ERROR_COUNT -gt 0 ] && [ $SUCCESS_COUNT -gt 0 ]; then
+    echo "✓ Error injection with retry is working!"
+    echo ""
+    echo "Analysis:"
+    echo "  - Errors were injected during the test"
+    echo "  - Most errors were recovered by retry mechanism"
+    echo "  - $ERROR_COUNT request(s) failed after exhausting all retries"
+    echo "  - This simulates real-world transient network failures"
+    echo ""
+    echo "Sample error injection and retry logs:"
+    kubectl logs $FRONTEND_POD --tail=100 | grep -E "ERROR-INJECTION|RETRY" | head -20
+elif [ $ERROR_COUNT -gt 0 ] && [ $SUCCESS_COUNT -eq 0 ]; then
+    echo "⚠ All requests failed - this may indicate a configuration issue,"
+    echo "  not error injection working correctly."
+elif [ $SUCCESS_COUNT -eq 100 ]; then
+    if [ $ERROR_INJECTION_COUNT -gt 0 ]; then
+        echo "✓ Retry mechanism is working perfectly!"
+        echo ""
+        echo "Analysis:"
+        echo "  - $ERROR_INJECTION_COUNT errors were injected"
+        echo "  - All injected errors were successfully recovered by retry"
+        echo "  - This demonstrates resilience to transient failures"
+        echo ""
+        echo "Sample error injection and retry logs:"
+        kubectl logs $FRONTEND_POD --tail=100 | grep -E "ERROR-INJECTION|RETRY" | head -20
+    else
+        echo "⚠ No errors were injected during the test."
+        echo "  Error injection may not be enabled or the sample size is too small."
+        echo ""
+        echo "Current error injection settings:"
+        kubectl get deployment frontend -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -o 'ERROR[^}]*' || echo "  Not configured"
+    fi
 else
     echo "⚠ No errors were observed. Error injection may not be enabled or"
     echo "  the error rate is too low for this sample size."
@@ -95,6 +147,7 @@ echo ""
 
 # Cleanup
 rm -f /tmp/test_cookies_*.txt
+rm -f /tmp/test_logs.txt
 
 # Stop port-forward if we started it
 if [ ! -z "${PORT_FORWARD_PID}" ]; then
@@ -103,4 +156,6 @@ if [ ! -z "${PORT_FORWARD_PID}" ]; then
 fi
 
 echo ""
+echo "======================================================================"
 echo "Test complete!"
+echo "======================================================================"

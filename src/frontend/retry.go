@@ -39,7 +39,7 @@ func shouldRetry(err error) bool {
 		return false
 	}
 	
-	// Retry on transient errors
+	// Retry on transient errors (including injected ones)
 	switch st.Code() {
 	case codes.Unavailable, codes.DeadlineExceeded, codes.Aborted:
 		return true

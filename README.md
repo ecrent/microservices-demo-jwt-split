@@ -20,7 +20,7 @@ This project investigates the performance impact of JWT compression in microserv
 
 ### Prerequisites
 
-The following tools should already be available in your Github Codespace:
+The following tools should already be available in your Github Codespace (at least 4core and 16GB ram):
 - `kubectl` - Kubernetes CLI
 - `skaffold` - Kubernetes development tool
 - `k6` - Load testing tool
@@ -33,6 +33,11 @@ The following tools should already be available in your Github Codespace:
 ## Step-by-Step Instructions
 
 ### Step 1: Enable JWT Compression and Run Test
+
+
+```bash
+sudo apt update && sudo apt upgrade
+```
 
 ```bash
 minikube start
@@ -117,6 +122,10 @@ nohup kubectl port-forward service/frontend 8080:80 > /tmp/port-forward.log 2>&1
 ### Step 7: Compare Results
 
 Now compare the performance between both tests:
+
+```bash
+sudo apt-get install tcpdump
+```
 
 ```bash
 ./compare-jwt-compression-enhanced.sh
