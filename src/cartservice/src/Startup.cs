@@ -68,7 +68,7 @@ namespace cartservice
             // Configure Kestrel for larger headers
             services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions>(options =>
             {
-                options.Limits.MaxRequestHeadersTotalSize = 262144; // 256KB
+                options.Limits.MaxRequestHeadersTotalSize = 524288; // 512KB
                 options.Limits.MaxRequestHeaderCount = 100;
             });
         }

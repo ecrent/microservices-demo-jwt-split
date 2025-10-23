@@ -292,12 +292,12 @@ func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
 	//   - 1052 session headers (213 bytes each)
 	//   - Dynamic/signature headers are NOT cached (0 bytes in table)
 	*conn, err = grpc.DialContext(ctx, addr,
-		grpc.WithInsecure(),
-		grpc.WithUnaryInterceptor(unaryChain),
-		grpc.WithStreamInterceptor(streamChain),
-		grpc.WithInitialWindowSize(65535),
-		grpc.WithInitialConnWindowSize(65535),
-		grpc.WithMaxHeaderListSize(262144)) // 256KB (224KB HPACK table + 32KB overhead)
+	grpc.WithInsecure(),
+	grpc.WithUnaryInterceptor(unaryChain),
+	grpc.WithStreamInterceptor(streamChain),
+	grpc.WithInitialWindowSize(65535),
+	grpc.WithInitialConnWindowSize(65535),
+	grpc.WithMaxHeaderListSize(524288)) // 512KB (480KB HPACK table + 32KB overhead)
 	if err != nil {
 		panic(errors.Wrapf(err, "grpc: failed to connect %s", addr))
 	}

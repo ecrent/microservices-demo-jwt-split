@@ -138,15 +138,13 @@ func main() {
 	// Configure HPACK table size: 256KB total (224KB HPACK table + 32KB overhead)
 	// With JWT shredding, this allows caching 1052 user sessions simultaneously
 	srv = grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			jwtUnaryServerInterceptor,
-			otelgrpc.UnaryServerInterceptor(),
-		),
-		grpc.ChainStreamInterceptor(
-			jwtStreamServerInterceptor,
-			otelgrpc.StreamServerInterceptor(),
-		),
-		grpc.MaxHeaderListSize(262144), // 256KB (224KB HPACK table + 32KB overhead)
+		otelgrpc.UnaryServerInterceptor(),
+	),
+	grpc.ChainStreamInterceptor(
+		jwtStreamServerInterceptor,
+		otelgrpc.StreamServerInterceptor(),
+	),
+	grpc.MaxHeaderListSize(524288), // 512KB (480KB HPACK table + 32KB overhead)
 	)
 
 	pb.RegisterCheckoutServiceServer(srv, svc)
@@ -231,7 +229,9 @@ func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
 			jwtStreamClientInterceptor,
 			otelgrpc.StreamClientInterceptor(),
 		),
-		grpc.WithMaxHeaderListSize(262144)) // 256KB (224KB HPACK table + 32KB overhead)
+		otelgrpc.StreamClientInterceptor(),
+	),
+	grpc.WithMaxHeaderListSize(524288)) // 512KB (480KB HPACK table + 32KB overhead)
 	if err != nil {
 		panic(errors.Wrapf(err, "grpc: failed to connect %s", addr))
 	}

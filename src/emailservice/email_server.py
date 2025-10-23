@@ -129,10 +129,10 @@ class HealthCheck():
       status=health_pb2.HealthCheckResponse.SERVING)
 
 def start(dummy_mode):
-  # Configure HPACK table size: 256KB total (224KB HPACK table + 32KB overhead)
+  # Configure HPACK table size: 512KB total (480KB HPACK table + 32KB overhead)
   # Options control gRPC server header handling
   options = [
-      ('grpc.max_metadata_size', 262144),  # 256KB (224KB HPACK table + 32KB overhead)
+      ('grpc.max_metadata_size', 524288),  # 512KB (480KB HPACK table + 32KB overhead)
       ('grpc.max_receive_message_length', -1),
       ('grpc.max_send_message_length', -1),
   ]
