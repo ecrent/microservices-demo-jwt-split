@@ -24,6 +24,6 @@ Payment Service (server.js)
 
 Updated grpc.max_metadata_size from 262144 to 65536
 
-cd /workspaces/microservices-demo && python3 analyze_jwt_header_indexing.py jwt-compression-results-on-400-256kb-wsl-longduration-20251022_073455/frontend-cart-traffic.pcap
+cd /workspaces/microservices-demo && python3 analyze_jwt_header_indexing.py jwt-compression-results-512kb-on-20251023_062624/frontend-cart-traffic.pcap
 
 
