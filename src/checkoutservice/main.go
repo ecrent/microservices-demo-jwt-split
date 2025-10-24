@@ -231,7 +231,8 @@ func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
 			jwtStreamClientInterceptor,
 			otelgrpc.StreamClientInterceptor(),
 		),
-		grpc.WithMaxHeaderListSize(524288)) // 512KB (480KB HPACK table + 32KB overhead)
+		grpc.WithMaxHeaderListSize(524288), // 512KB (480KB HPACK table + 32KB overhead)
+	)
 	if err != nil {
 		panic(errors.Wrapf(err, "grpc: failed to connect %s", addr))
 	}

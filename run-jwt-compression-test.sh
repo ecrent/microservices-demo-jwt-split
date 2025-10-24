@@ -115,11 +115,59 @@ echo "Capturing traffic between ${FRONTEND_IP} <-> ${CARTSERVICE_IP} on port 707
 sleep 1
 
 # ====================================================================
+# Background job: Trigger cartservice outage during test
+# ====================================================================
+(
+    # Wait for 130 seconds (60s ramp-up + 70s steady state)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Outage scheduler: Waiting 130 seconds before triggering cartservice outage..."
+    sleep 130
+    
+    echo ""
+    echo "======================================================================"
+    echo "  [$(date '+%Y-%m-%d %H:%M:%S')] TRIGGERING CARTSERVICE OUTAGE"
+    echo "======================================================================"
+    echo "Scaling cartservice to 0 replicas..."
+    kubectl scale deployment/cartservice --replicas=0
+    
+    echo "Waiting for pod to terminate..."
+    kubectl wait --for=delete pod -l app=cartservice --timeout=30s 2>/dev/null || true
+    echo "  ✓ Cartservice pod terminated"
+    
+    echo "Outage duration: 10 seconds..."
+    sleep 10
+    
+    echo ""
+    echo "======================================================================"
+    echo "  [$(date '+%Y-%m-%d %H:%M:%S')] RESTORING CARTSERVICE"
+    echo "======================================================================"
+    echo "Scaling cartservice back to 1 replica..."
+    kubectl scale deployment/cartservice --replicas=1
+    
+    echo "Waiting for new pod to be ready..."
+    kubectl wait --for=condition=ready pod -l app=cartservice --timeout=60s
+    
+    NEW_CARTSERVICE_POD=$(kubectl get pods -l app=cartservice -o jsonpath='{.items[0].metadata.name}')
+    NEW_CARTSERVICE_IP=$(kubectl get pod ${NEW_CARTSERVICE_POD} -o jsonpath='{.status.podIP}')
+    
+    echo "  ✓ Cartservice restored"
+    echo "  New pod: ${NEW_CARTSERVICE_POD}"
+    echo "  New IP: ${NEW_CARTSERVICE_IP}"
+    echo "  Note: HPACK dynamic table has been reset (cold cache)"
+    echo ""
+    echo "======================================================================"
+    
+) &
+
+OUTAGE_JOB_PID=$!
+echo "[Background] Cartservice outage scheduled (PID: ${OUTAGE_JOB_PID})"
+echo ""
+
+# ====================================================================
 # Run k6 load test
 # ====================================================================
 echo ""
 echo "======================================================================"
-echo "  Running k6 load test (100 users, ~3 minutes)"
+echo "  Running k6 load test (200 users, ~4 minutes)"
 echo "======================================================================"
 echo ""
 echo "Test scenario:"
@@ -131,10 +179,12 @@ echo "  5. User adds 1 item to cart → Uses JWT #2"
 echo "  6. User places order → Uses JWT #2"
 echo "  7. User continues shopping"
 echo ""
-echo "Expected HPACK behavior:"
-echo "  - JWT #1: Cold cache, full 702 bytes transmitted"
-echo "  - JWT #2: Warm cache, ~428 bytes (static+session cached)"
+echo "Scheduled service outage:"
+echo "  - Timing: 130s after test start (70s into steady state)"
+echo "  - Duration: 10 seconds + deployment time"
+echo "  - Impact: CartService pod restart → HPACK dynamic table reset"
 echo ""
+
 echo "Starting test..."
 echo ""
 
@@ -148,6 +198,12 @@ echo "======================================================================"
 echo "  Test completed!"
 echo "======================================================================"
 echo ""
+
+# Wait for outage job to complete if still running
+if kill -0 ${OUTAGE_JOB_PID} 2>/dev/null; then
+    echo "Waiting for outage job to complete..."
+    wait ${OUTAGE_JOB_PID} 2>/dev/null || true
+fi
 
 # Give tcpdump a moment to flush buffers
 sleep 5

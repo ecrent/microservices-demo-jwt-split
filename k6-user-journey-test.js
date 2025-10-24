@@ -12,11 +12,11 @@ const responseSize = new Trend('response_size_bytes');
 
 export const options = {
   stages: [
-    { duration: '60s', target: 400 },  // Ramp up to 400 users over 60s
-    { duration: '180s', target: 400 }, // Stay at 400 users for 180s (allows for 125s wait + operations)
+    { duration: '60s', target: 200 },  // Ramp up to 200 users over 60s
+    { duration: '180s', target: 200 }, // Stay at 200 users for 180s (allows for 125s wait + operations)
   ],
   thresholds: {
-    http_req_failed: ['rate<0.05'], // Less than 5% errors
+    http_req_failed: ['rate<0.10'], // Less than 10% errors (increased due to service outage test)
     http_req_duration: ['p(95)<2000'], // 95% of requests under 2s
   },
 };

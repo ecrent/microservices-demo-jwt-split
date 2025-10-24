@@ -26,7 +26,7 @@ kubectl set env deployment/${DEPLOYMENT} \
 
 echo ""
 echo "Waiting for deployment to roll out..."
-kubectl rollout status deployment/${DEPLOYMENT}
+skaffold run
 
 echo ""
 echo "======================================================================"
