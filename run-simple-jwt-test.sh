@@ -3,17 +3,13 @@
 set -e
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="./jwt-simple-test-${TIMESTAMP}"
+RESULTS_DIR="./jwt-compression-results-${TIMESTAMP}"
 mkdir -p "${RESULTS_DIR}"
 
 echo "======================================================================"
-echo "  Simple JWT Test - Single User Journey"
+echo "  JWT Compression Performance Test"
+echo "  Testing HPACK efficiency with JWT renewal scenario"
 echo "======================================================================"
-echo ""
-echo "Test scenario:"
-echo "  1. User visits frontpage → Gets JWT"
-echo "  2. User adds 1 item to cart → Uses JWT in gRPC call"
-echo "  Total duration: ~10 seconds"
 echo ""
 echo "Results will be saved to: ${RESULTS_DIR}"
 echo ""
@@ -32,7 +28,7 @@ echo "Cart service pod: ${CARTSERVICE_POD}"
 echo ""
 
 # Check if port-forward is already running
-if ! pgrep -f "kubectl.*port-forward.*8080:80" > /dev/null; then
+if ! pgrep -f "kubectl.*port-forward.*8080:8080" > /dev/null; then
     echo "Starting port-forward to frontend service..."
     kubectl port-forward service/frontend 8080:80 > /dev/null 2>&1 &
     PORT_FORWARD_PID=$!
@@ -53,15 +49,23 @@ cleanup() {
     echo "======================================================================"
     
     # Stop tcpdump capture on minikube node
-    if [ ! -z "${TCPDUMP_PID}" ]; then
-        echo "Stopping tcpdump (PID: ${TCPDUMP_PID})..."
-        kill -INT ${TCPDUMP_PID} 2>/dev/null || true
-        sleep 2
+    if [ "$TCPDUMP_RUNNING" = "yes" ]; then
+        echo "Stopping tcpdump in minikube..."
+        minikube ssh "sudo pkill -INT tcpdump" 2>/dev/null || true
+        sleep 3
     fi
     
     # Copy pcap file from minikube node
     echo "Downloading capture file from minikube..."
-    minikube cp minikube:/tmp/frontend-cart-traffic.pcap "${RESULTS_DIR}/frontend-cart-traffic.pcap" 2>/dev/null || echo "  Warning: Could not copy pcap file"
+    if minikube cp minikube:/tmp/frontend-cart-traffic.pcap "${RESULTS_DIR}/frontend-cart-traffic.pcap" 2>/dev/null; then
+        PCAP_SIZE=$(ls -lh "${RESULTS_DIR}/frontend-cart-traffic.pcap" | awk '{print $5}')
+        echo "  ✓ Captured pcap file: ${PCAP_SIZE}"
+    else
+        echo "  ✗ Warning: Could not copy pcap file"
+    fi
+    
+    # Clean up on minikube
+    minikube ssh "sudo rm -f /tmp/frontend-cart-traffic.pcap /tmp/tcpdump.log" 2>/dev/null || true
     
     # Stop port-forward if we started it
     if [ ! -z "${PORT_FORWARD_PID}" ]; then
@@ -75,7 +79,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ====================================================================
-# Start tcpdump on minikube node to capture frontend <-> cartservice traffic
+# Start tcpdump on host to capture frontend <-> cartservice traffic
 # ====================================================================
 echo "======================================================================"
 echo "  Starting traffic capture on Minikube node..."
@@ -88,27 +92,59 @@ CARTSERVICE_IP=$(kubectl get pod ${CARTSERVICE_POD} -o jsonpath='{.status.podIP}
 echo "Frontend IP: ${FRONTEND_IP}"
 echo "CartService IP: ${CARTSERVICE_IP}"
 
-# Start tcpdump on minikube node (capturing gRPC traffic on port 7070)
-minikube ssh "sudo tcpdump -i any -s 0 '(host ${FRONTEND_IP} and host ${CARTSERVICE_IP}) and tcp port 7070' -w /tmp/frontend-cart-traffic.pcap" > /dev/null 2>&1 &
-TCPDUMP_PID=$!
+# Clean up any old pcap file
+minikube ssh "sudo rm -f /tmp/frontend-cart-traffic.pcap" 2>/dev/null || true
 
-echo "Traffic capture started on minikube node (PID: ${TCPDUMP_PID})"
-echo "Capturing gRPC traffic between ${FRONTEND_IP} <-> ${CARTSERVICE_IP} on port 7070"
-sleep 3
+# Start tcpdump on minikube node using nohup to keep it running after SSH disconnects
+minikube ssh "sudo sh -c 'nohup tcpdump -i any -s 0 \"(host ${FRONTEND_IP} and host ${CARTSERVICE_IP}) and tcp port 7070\" -w /tmp/frontend-cart-traffic.pcap > /tmp/tcpdump.log 2>&1 &'" 
+
+# Give tcpdump a moment to start
+sleep 2
+
+# Verify tcpdump is running
+TCPDUMP_CHECK=$(minikube ssh "pgrep tcpdump" 2>/dev/null || echo "")
+if [ ! -z "$TCPDUMP_CHECK" ]; then
+    echo "Traffic capture started successfully (tcpdump PID in minikube: ${TCPDUMP_CHECK})"
+    TCPDUMP_RUNNING="yes"
+else
+    echo "⚠ Warning: tcpdump may not have started properly"
+    TCPDUMP_RUNNING=""
+fi
+
+echo "Capturing traffic between ${FRONTEND_IP} <-> ${CARTSERVICE_IP} on port 7070"
+sleep 1
+
 
 # ====================================================================
-# Run k6 simple test
+# Run k6 load test
 # ====================================================================
 echo ""
 echo "======================================================================"
-echo "  Running k6 simple test (1 user, 10 seconds max)"
+echo "  Running k6 load test (200 users, ~4 minutes)"
 echo "======================================================================"
+echo ""
+echo "Test scenario:"
+echo "  1. User visits frontpage → Gets JWT #1"
+echo "  2. User adds 2 items to cart → Uses JWT #1"
+echo "  3. User waits 125 seconds → JWT expires"
+echo "  4. User returns to shopping → Gets JWT #2"
+echo "  5. User adds 1 item to cart → Uses JWT #2"
+echo "  6. User places order → Uses JWT #2"
+echo "  7. User continues shopping"
+echo ""
+echo "Scheduled service outage:"
+echo "  - Timing: 130s after test start (70s into steady state)"
+echo "  - Duration: 10 seconds + deployment time"
+echo "  - Impact: CartService pod restart → HPACK dynamic table reset"
+echo ""
+
+echo "Starting test..."
 echo ""
 
 k6 run \
     --out json="${RESULTS_DIR}/k6-results.json" \
     --summary-export="${RESULTS_DIR}/k6-summary.json" \
-    k6-simple-test.js 2>&1 | tee "${RESULTS_DIR}/k6-output.log"
+    k6-user-journey-test.js 2>&1 | tee "${RESULTS_DIR}/k6-output.log"
 
 echo ""
 echo "======================================================================"
@@ -116,8 +152,10 @@ echo "  Test completed!"
 echo "======================================================================"
 echo ""
 
+
+
 # Give tcpdump a moment to flush buffers
-sleep 3
+sleep 5
 
 echo "Capture files and results saved to: ${RESULTS_DIR}"
 echo ""
@@ -128,28 +166,26 @@ echo "======================================================================"
 echo "  Analysis Instructions"
 echo "======================================================================"
 echo ""
-echo "To analyze the gRPC call with JWT headers:"
+echo "To analyze HTTP/2 HPACK compression:"
 echo ""
-echo "1. Open pcap in Wireshark:"
-echo "   wireshark ${RESULTS_DIR}/frontend-cart-traffic.pcap"
+echo "1. Open pcap files in Wireshark:"
+echo "   wireshark ${RESULTS_DIR}/frontend-to-cart.pcap"
 echo ""
 echo "2. Apply display filter:"
 echo "   http2"
 echo ""
-echo "3. Find the AddItem gRPC call (HEADERS frame)"
-echo "   Look for ':path' = '/hipstershop.CartService/AddItem'"
+echo "3. Look for HEADERS frames containing JWT headers:"
+echo "   - x-jwt-static (should use 'Indexed Header Field' after first request)"
+echo "   - x-jwt-session (should use 'Indexed Header Field' after first request)"
+echo "   - x-jwt-dynamic (should use 'Literal without Indexing' always)"
+echo "   - x-jwt-sig (should use 'Literal without Indexing' always)"
 echo ""
-echo "4. Expand 'Header: ' section to see JWT headers:"
-echo "   - x-jwt-static"
-echo "   - x-jwt-session"
-echo "   - x-jwt-dynamic"
-echo "   - x-jwt-sig"
+echo "4. Compare frame sizes:"
+echo "   - First request (cold cache): HEADERS frame ~750+ bytes"
+echo "   - Subsequent requests (warm cache): HEADERS frame ~450-500 bytes"
+echo "   - After JWT renewal (125s wait): New session, partial cache hit"
 echo ""
-echo "5. Check HPACK representation for each header:"
-echo "   - Should see 'Literal Header Field with Incremental Indexing'"
-echo "   - Note the byte sizes"
-echo ""
-echo "6. Or use tshark for quick analysis:"
-echo "   tshark -r ${RESULTS_DIR}/frontend-cart-traffic.pcap -Y 'http2.type==1' -V | grep -A 5 'x-jwt'"
+echo "5. Or use tshark for quick analysis:"
+echo "   tshark -r ${RESULTS_DIR}/frontend-to-cart.pcap -Y 'http2.type==1' -T fields -e frame.number -e frame.len -e http2.header.length"
 echo ""
 echo "======================================================================"
