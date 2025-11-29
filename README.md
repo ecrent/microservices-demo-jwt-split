@@ -21,9 +21,8 @@ This project investigates the performance impact of JWT compression in microserv
 ### Prerequisites
 
 The following tools should already be available in your Github Codespace (at least 4core and 16GB ram):
+
 - `kubectl` - Kubernetes CLI
-- `skaffold` - Kubernetes development tool
-- `k6` - Load testing tool
 - `jq` - JSON processor
 - `tshark` - Network analysis
 - `git` - Version control
@@ -46,11 +45,33 @@ minikube start
 minikube ssh "sudo apt-get update && sudo apt-get install -y tcpdump"
 ```
 
+Install skaffold for linux x86_64
+
+```bash
+curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64 && sudo install skaffold /usr/local/bin/ && rm skaffold && skaffold version
+```
+
+Install k6 and tcpdump
+
+```bash
+curl -L https://github.com/grafana/k6/releases/download/v0.51.0/k6-v0.51.0-linux-amd64.tar.gz -o k6.tar.gz && tar -xzf k6.tar.gz && sudo mv k6-v0.51.0-linux-amd64/k6 /usr/local/bin/ && rm -rf k6.tar.gz k6-v0.51.0-linux-amd64 && k6 version
+```
+Install tshark
+
+```bash
+sudo DEBIAN_FRONTEND=noninteractive apt-get installsudo DEBIAN_FRONTEND=noninteractive apt-get install
+```
+
+```bash
+sudo apt-get update && sudo apt-get install -y tcpdump
+```
+
 Enable JWT compression across all services:
 
 ```bash
 ./enable_jwt_compression.sh
 ```
+This will take a little while.
 
 **What this does:**
 - Updates YAML manifests to set `ENABLE_JWT_COMPRESSION=true`
@@ -70,15 +91,12 @@ If pods are not ready, wait a few more minutes and check again.
 
 ### Step 3: Run JWT Compression Test (Enabled)
 
-
-```bash
-nohup kubectl port-forward service/frontend 8080:80 > /tmp/port-forward.log 2>&1 &
-```
+The default settings for the test is for 512kb Dynamic Table size and for 200 Users
 
 Run the load test with JWT compression enabled:
 
 ```bash
-./run-jwt-compression-test.sh
+./run-jwt-compression-test.s
 ```
 
 **What this does:**
@@ -96,7 +114,7 @@ Now disable JWT compression:
 ./disable_jwt_compression.sh
 ```
 
-### Step 5: Verify Pods are Running (Again)
+### Step 5: Verify Pods are Running
 
 Verify all pods restarted successfully:
 
@@ -110,9 +128,6 @@ Wait for all pods to be `Running` with `1/1` ready.
 
 Run the load test again with JWT compression disabled:
 
-```bash
-nohup kubectl port-forward service/frontend 8080:80 > /tmp/port-forward.log 2>&1 &
-```
 
 ```bash
 ./run-jwt-compression-test.sh
@@ -123,13 +138,6 @@ nohup kubectl port-forward service/frontend 8080:80 > /tmp/port-forward.log 2>&1
 
 Now compare the performance between both tests:
 
-```bash
-sudo apt-get install tcpdump
-```
-
-```bash
-./compare-jwt-compression-enhanced.sh
-```
 
 **Edit the script first** to set your test directories at the top:
 
@@ -139,7 +147,11 @@ ENABLED_DIR="jwt-compression-on-results-20251017_143022"
 DISABLED_DIR="jwt-compression-off-results-20251017_144530"
 ```
 
-Or modify the script to accept command-line arguments.
+```bash
+./compare-jwt-compression-enhanced.sh
+```
+
+
 
 **What the comparison shows:**
 

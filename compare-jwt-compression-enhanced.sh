@@ -4,8 +4,8 @@
 # Compares performance and network metrics between JWT compression ON and OFF
 #
 
-ENABLED_DIR="jwt-compression-results-512kb-on-200-serverdown-20251025_063754"
-DISABLED_DIR="jwt-compression-results-20251025_070558"
+ENABLED_DIR="jwt-compression-results-on-200-512kb-codespaces-20251129_161651"
+DISABLED_DIR="jwt-compression-results-off-200-512kb-codespaces-20251129_163038"
 
 # Colors for output
 RED='\033[0;31m'
@@ -235,22 +235,6 @@ echo "  JWT Header Analysis"
 echo -e "======================================================================${NC}"
 echo ""
 
-echo -e "${CYAN}JWT Compression ON:${NC}"
-echo "  Uses 4 separate headers:"
-echo "    • x-jwt-static       (112b) - Cacheable by HPACK"
-echo "    • x-jwt-session      (168b) - Cacheable by HPACK"
-echo "    • x-jwt-dynamic-bin  (122b) - NOT cached (binary)"
-echo "    • x-jwt-sig-bin      (342b) - NOT cached (binary)"
-echo "  Total: ~744 bytes first request"
-echo "  After HPACK caching: ~470 bytes (static/session use indices)"
-echo ""
-
-echo -e "${CYAN}JWT Compression OFF:${NC}"
-echo "  Uses single authorization header:"
-echo "    • authorization: Bearer <full-jwt>"
-echo "  Total: ~900+ bytes every request"
-echo "  No HPACK caching benefit (JWT changes every request)"
-echo ""
 
 if [ ! -z "$ENABLED_JWT_FRAMES" ] && [ ! -z "$DISABLED_AUTH_FRAMES" ]; then
     echo -e "${GREEN}Header Usage Verification:${NC}"
@@ -288,13 +272,7 @@ if [ ! -z "$SENT_SAVINGS" ]; then
     else
         echo "     • P95 response time:        Similar performance"
     fi
-    echo ""
-    echo "  🎯 Key Benefits:"
-    echo "     • Reduced header size per request"
-    echo "     • HPACK caching for static/session components"
-    echo "     • Better bandwidth utilization"
-    echo "     • Scalable to 300+ concurrent users"
-    echo ""
+
 fi
 
 echo -e "${CYAN}For detailed packet analysis:${NC}"
