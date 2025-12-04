@@ -27,3 +27,34 @@ Updated grpc.max_metadata_size from 262144 to 65536
 cd /workspaces/microservices-demo && python3 analyze_jwt_header_indexing.py jwt-compression-results-512kb-on-20251023_062624/frontend-cart-traffic.pcap
 
 
+// Decode base64 x2 (two times)
+headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])   // 1st decode
+payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])  // 2nd decode
+
+// Parse JSON x2 (two times)
+json.Unmarshal(headerJSON, &header)   // 1st parse
+json.Unmarshal(payloadJSON, &payload) // 2nd parse
+
+// Serialize JSON x3 (three times)
+staticJSON, _ := json.Marshal(static)   // 1st serialize
+sessionJSON, _ := json.Marshal(session) // 2nd serialize
+dynamicJSON, _ := json.Marshal(dynamic) // 3rd serialize
+
+// Parse JSON x3 (three times)
+json.Unmarshal([]byte(components.Static), &staticMap)   // 1st parse
+json.Unmarshal([]byte(components.Session), &sessionMap) // 2nd parse
+json.Unmarshal([]byte(components.Dynamic), &dynamicMap) // 3rd parse
+
+// Serialize JSON x2 (two times)
+headerJSON, err := json.Marshal(header)   // 1st serialize
+payloadJSON, err := json.Marshal(payload) // 2nd serialize
+
+// Encode base64 x2 (two times)
+headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)  // 1st encode
+payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON) // 2nd encode
+
+Operation	Decompose	Reassemble	Total
+Base64 decode	2	0	2
+JSON parse	2	3	5
+JSON serialize	3	2	5
+Base64 encode	0	2	2
