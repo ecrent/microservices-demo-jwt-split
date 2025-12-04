@@ -11,6 +11,10 @@ namespace cartservice.interceptors
 {
     public class JwtLoggingInterceptor : Interceptor
     {
+        // JWT Header constant - RS256 algorithm, JWT type
+        // Base64URL encoded: {"alg":"RS256","typ":"JWT"}
+        private const string JWTHeaderB64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+
         private bool IsCompressionEnabled => 
             Environment.GetEnvironmentVariable("ENABLE_JWT_COMPRESSION") == "true";
 
@@ -19,158 +23,35 @@ namespace cartservice.interceptors
             ServerCallContext context,
             UnaryServerMethod<TRequest, TResponse> continuation)
         {
-            string jwt = null;
-            bool wasCompressed = false;
-
-            // Check for compressed JWT headers (x-jwt-*)
-            var staticHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-static");
-            if (staticHeader != null)
+            // Check for compressed JWT header (x-jwt-payload)
+            var payloadHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-payload");
+            if (payloadHeader != null)
             {
-                // Compressed format detected - reassemble JWT
-                // x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-                // x-jwt-sig is base64 (original signature format)
-                var sessionHeader = context.RequestHeaders.First(h => h.Key == "x-jwt-session");
-                var dynamicHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-dynamic");
+                // Compressed format: raw JSON payload + signature
                 var sigHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-sig");
                 
-                string dynamicValue, sigValue;
-                
-                try
+                if (sigHeader != null)
                 {
-                    if (dynamicHeader != null && sigHeader != null)
-                    {
-                        dynamicValue = dynamicHeader.Value;
-                        sigValue = sigHeader.Value;
-                    }
-                    else
-                    {
-                        throw new Exception("Missing x-jwt-dynamic or x-jwt-sig headers");
-                    }
-                    
-                    jwt = ReassembleJWT(staticHeader.Value, sessionHeader.Value, dynamicValue, sigValue);
-                    wasCompressed = true;
-
-                    int totalSize = staticHeader.Value.Length + sessionHeader.Value.Length + dynamicValue.Length + sigValue.Length;
-                    Console.WriteLine($"[JWT-FLOW] Cart Service ← Frontend/Checkout: Received compressed JWT ({totalSize} bytes) via {context.Method}");
-                    Console.WriteLine($"[JWT-COMPRESSION] Component sizes - Static: {staticHeader.Value.Length}b, Session: {sessionHeader.Value.Length}b, Dynamic: {dynamicValue.Length}b, Sig: {sigValue.Length}b");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[JWT-ERROR] Failed to read JWT headers: {ex.Message}");
-                    jwt = null;
+                    // Reassemble JWT (not used currently, but available for future validation)
+                    _ = ReassembleJWT(payloadHeader.Value, sigHeader.Value);
                 }
             }
-            else
-            {
-                // Standard format: "Bearer <token>"
-                var authHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "authorization");
-                if (authHeader != null)
-                {
-                    jwt = authHeader.Value.Replace("Bearer ", "");
-                    Console.WriteLine($"[JWT-FLOW] Cart Service ← Frontend/Checkout: Received full JWT ({jwt.Length} bytes) via {context.Method}");
-                }
-            }
-
-            // Log JWT reception (debug)
-            if (jwt != null)
-            {
-                Console.WriteLine($"[JWT-DEBUG] JWT preview: {jwt.Substring(0, Math.Min(50, jwt.Length))}...");
-            }
-            else
-            {
-                // Don't log health checks - they're infrastructure probes
-                if (!context.Method.Contains("Health/Check"))
-                {
-                    Console.WriteLine($"[JWT-FLOW] Cart Service: No JWT received in {context.Method}");
-                }
-            }
+            // Standard format handled implicitly (no action needed)
 
             return await continuation(request, context);
         }
 
-        private string ReassembleJWT(string staticJson, string sessionJson, string dynamicJson, string signature)
+        /// <summary>
+        /// Reassemble JWT from raw JSON payload and signature.
+        /// Operations: 1 base64 encode (payload only)
+        /// </summary>
+        private string ReassembleJWT(string payloadJson, string signature)
         {
-            try
-            {
-                // Configure JsonSerializerOptions for .NET 9.0 AOT compatibility
-                var options = new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true,
-                    WriteIndented = false
-                };
+            // Base64Url encode the raw JSON payload - ONLY OPERATION
+            string payloadB64 = Base64UrlEncode(Encoding.UTF8.GetBytes(payloadJson));
 
-                // Parse JSON components
-                var staticObj = JsonDocument.Parse(staticJson).RootElement;
-                var sessionObj = JsonDocument.Parse(sessionJson).RootElement;
-                var dynamicObj = JsonDocument.Parse(dynamicJson).RootElement;
-
-                // Rebuild header using string concatenation to avoid reflection
-                var alg = staticObj.GetProperty("alg").GetString();
-                var typ = staticObj.GetProperty("typ").GetString();
-                string headerJson = $"{{\"alg\":\"{alg}\",\"typ\":\"{typ}\"}}";
-
-                // Rebuild payload by merging all claims using string builder
-                var payloadParts = new List<string>();
-
-                // Add static claims (except alg and typ which go in header)
-                foreach (var prop in staticObj.EnumerateObject())
-                {
-                    if (prop.Name != "alg" && prop.Name != "typ")
-                    {
-                        payloadParts.Add(FormatJsonProperty(prop.Name, prop.Value));
-                    }
-                }
-
-                // Add session claims
-                foreach (var prop in sessionObj.EnumerateObject())
-                {
-                    payloadParts.Add(FormatJsonProperty(prop.Name, prop.Value));
-                }
-
-                // Add dynamic claims
-                foreach (var prop in dynamicObj.EnumerateObject())
-                {
-                    payloadParts.Add(FormatJsonProperty(prop.Name, prop.Value));
-                }
-
-                // Build payload JSON
-                string payloadJson = "{" + string.Join(",", payloadParts) + "}";
-
-                // Base64Url encode
-                string headerB64 = Base64UrlEncode(Encoding.UTF8.GetBytes(headerJson));
-                string payloadB64 = Base64UrlEncode(Encoding.UTF8.GetBytes(payloadJson));
-
-                // Reconstruct JWT
-                string jwt = $"{headerB64}.{payloadB64}.{signature}";
-                Console.WriteLine($"[JWT-COMPRESSION] JWT reassembled from compressed headers ({jwt.Length} bytes)");
-                Console.WriteLine($"[JWT-COMPRESSION] Component sizes - Static: {staticJson.Length}b, Session: {sessionJson.Length}b, Dynamic: {dynamicJson.Length}b, Sig: {signature.Length}b");
-                
-                return jwt;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[JWT-COMPRESSION] Failed to reassemble JWT: {ex.Message}");
-                return null;
-            }
-        }
-
-        private string FormatJsonProperty(string name, JsonElement value)
-        {
-            switch (value.ValueKind)
-            {
-                case JsonValueKind.String:
-                    return $"\"{name}\":\"{value.GetString()}\"";
-                case JsonValueKind.Number:
-                    return $"\"{name}\":{value.GetRawText()}";
-                case JsonValueKind.True:
-                    return $"\"{name}\":true";
-                case JsonValueKind.False:
-                    return $"\"{name}\":false";
-                case JsonValueKind.Null:
-                    return $"\"{name}\":null";
-                default:
-                    return $"\"{name}\":{value.GetRawText()}";
-            }
+            // Reconstruct JWT using hardcoded header constant
+            return $"{JWTHeaderB64}.{payloadB64}.{signature}";
         }
 
         private string Base64UrlEncode(byte[] input)

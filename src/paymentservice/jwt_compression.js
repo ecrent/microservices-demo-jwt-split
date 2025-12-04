@@ -1,7 +1,11 @@
 // JWT Compression Library for Node.js
-// Decomposes JWT into HPACK-optimized components
+// Optimized: only 2 components (payload + signature), hardcoded header
 
 const logger = require('./logger');
+
+// JWT Header constant - RS256 algorithm, JWT type
+// Base64URL encoded: {"alg":"RS256","typ":"JWT"}
+const JWT_HEADER_B64 = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9';
 
 /**
  * Check if JWT compression is enabled via environment variable
@@ -11,9 +15,10 @@ function isJWTCompressionEnabled() {
 }
 
 /**
- * Decompose JWT into HPACK-optimized components
+ * Decompose JWT for optimized transmission
  * @param {string} jwt - Full JWT token
- * @returns {Object} Object with static, session, dynamic, and signature components
+ * @returns {Object} Object with payload (raw JSON) and signature
+ * Operations: 1 base64 decode (payload only)
  */
 function decomposeJWT(jwt) {
   if (!jwt) {
@@ -29,48 +34,15 @@ function decomposeJWT(jwt) {
   const [headerB64, payloadB64, signatureB64] = parts;
 
   try {
-    // Decode header and payload
-    const header = JSON.parse(Buffer.from(headerB64, 'base64').toString('utf8'));
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf8'));
-
-    // Static claims (never change per user session)
-    const staticClaims = {
-      alg: header.alg,
-      typ: header.typ,
-      iss: payload.iss,
-      aud: payload.aud,
-      name: payload.name
-    };
-
-    // Session claims (stable during user session)
-    const sessionClaims = {
-      sub: payload.sub,
-      session_id: payload.session_id,
-      market_id: payload.market_id,
-      currency: payload.currency,
-      cart_id: payload.cart_id
-    };
-
-    // Dynamic claims (change frequently)
-    const dynamicClaims = {
-      exp: payload.exp,
-      iat: payload.iat,
-      jti: payload.jti
-    };
-
-    // Encode components
-    const staticHeader = Buffer.from(JSON.stringify(staticClaims)).toString('base64url');
-    const sessionHeader = Buffer.from(JSON.stringify(sessionClaims)).toString('base64url');
-    const dynamicHeader = Buffer.from(JSON.stringify(dynamicClaims)).toString('base64url');
+    // Decode payload only - ONLY OPERATION
+    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
 
     const result = {
-      static: staticHeader,
-      session: sessionHeader,
-      dynamic: dynamicHeader,
-      signature: signatureB64
+      payload: payloadJson,    // Raw JSON (~25% smaller than base64)
+      signature: signatureB64  // Keep as-is
     };
 
-    logger.debug(`JWT decomposed: static=${staticHeader.length}b, session=${sessionHeader.length}b, dynamic=${dynamicHeader.length}b, sig=${signatureB64.length}b`);
+    logger.debug(`JWT decomposed: payload=${payloadJson.length}b, sig=${signatureB64.length}b`);
 
     return result;
   } catch (err) {
@@ -80,61 +52,27 @@ function decomposeJWT(jwt) {
 }
 
 /**
- * Reassemble JWT from compressed components
- * @param {Object} metadata - gRPC metadata object containing x-jwt-* headers
+ * Reassemble JWT from raw JSON payload and signature
+ * @param {Object} metadata - gRPC metadata object containing x-jwt-payload and x-jwt-sig headers
  * @returns {string|null} Reassembled JWT or null
+ * Operations: 1 base64 encode (payload only)
  */
 function reassembleJWT(metadata) {
-  // Check for compressed JWT components
-  // x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-  // x-jwt-sig is base64 (original signature format)
-  const staticHeader = getMetadataValue(metadata, 'x-jwt-static');
-  const sessionHeader = getMetadataValue(metadata, 'x-jwt-session');
-  const dynamicHeader = getMetadataValue(metadata, 'x-jwt-dynamic');
+  // Check for compressed JWT components (new format)
+  const payloadHeader = getMetadataValue(metadata, 'x-jwt-payload');
   const signature = getMetadataValue(metadata, 'x-jwt-sig');
 
-  if (staticHeader && sessionHeader && dynamicHeader && signature) {
+  if (payloadHeader && signature) {
     try {
-      // The headers are already JSON strings from Go service
-      const staticClaims = JSON.parse(staticHeader);
-      const sessionClaims = JSON.parse(sessionHeader);
-      const dynamicClaims = JSON.parse(dynamicHeader);
+      // Base64url encode the raw JSON payload - ONLY OPERATION
+      const payloadB64 = Buffer.from(payloadHeader, 'utf8').toString('base64url');
 
-      // Separate header from static claims
-      const header = {
-        alg: staticClaims.alg,
-        typ: staticClaims.typ
-      };
-
-      // Merge all payload claims
-      const payload = {
-        ...staticClaims,
-        ...sessionClaims,
-        ...dynamicClaims
-      };
-      
-      // Remove header fields from payload
-      delete payload.alg;
-      delete payload.typ;
-
-      // Encode header and payload
-      const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
-      const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-
-      // Reassemble JWT
-      const jwt = `${headerB64}.${payloadB64}.${signature}`;
-
-      logger.info(`[JWT-COMPRESSION] JWT reassembled from compressed headers (${jwt.length} bytes)`);
-      logger.info(`[JWT-COMPRESSION] Component sizes - Static: ${staticHeader.length}b, Session: ${sessionHeader.length}b, Dynamic: ${dynamicHeader.length}b, Sig: ${signature.length}b`);
+      // Reassemble JWT using hardcoded header constant
+      const jwt = `${JWT_HEADER_B64}.${payloadB64}.${signature}`;
 
       return jwt;
     } catch (err) {
-      logger.warn(`[JWT-COMPRESSION] Failed to reassemble JWT: ${err.message}`);
-      logger.warn(`[JWT-COMPRESSION] staticHeader type: ${typeof staticHeader}, isBuffer: ${Buffer.isBuffer(staticHeader)}`);
-      if (staticHeader) {
-        const sample = staticHeader.slice ? staticHeader.slice(0, 20) : staticHeader.substring(0, 20);
-        logger.warn(`[JWT-COMPRESSION] staticHeader sample: ${sample}`);
-      }
+      logger.warn(`Failed to reassemble JWT: ${err.message}`);
       return null;
     }
   }
@@ -193,15 +131,12 @@ function addCompressedJWT(metadata, jwt) {
     return;
   }
 
-  // Add compressed components
-  metadata.set('x-jwt-static', components.static);
-  metadata.set('x-jwt-session', components.session);
-  metadata.set('x-jwt-dynamic', components.dynamic);
+  // Add compressed components: raw JSON payload + signature
+  metadata.set('x-jwt-payload', components.payload);
   metadata.set('x-jwt-sig', components.signature);
 
-  const totalSize = components.static.length + components.session.length + 
-                    components.dynamic.length + components.signature.length;
-  logger.debug(`Forwarding compressed JWT: total=${totalSize}b`);
+  const totalSize = components.payload.length + components.signature.length;
+  logger.debug(`Forwarding compressed JWT: payload=${components.payload.length}b, sig=${components.signature.length}b`);
 }
 
 module.exports = {
@@ -209,5 +144,6 @@ module.exports = {
   decomposeJWT,
   reassembleJWT,
   addCompressedJWT,
-  getMetadataValue
+  getMetadataValue,
+  JWT_HEADER_B64
 };

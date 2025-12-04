@@ -21,47 +21,32 @@ func jwtUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.
 
 	var jwtToken string
 
-	// Check for compressed JWT format (x-jwt-* headers)
-	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
-		// Compressed format detected
-		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-		// x-jwt-sig is base64 (original signature format)
-		var dynamic, signature string
-		
-		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
-			dynamic = dynamicHeaders[0]
-		}
+	// Check for compressed JWT format (x-jwt-payload header)
+	if payloadHeaders := md.Get("x-jwt-payload"); len(payloadHeaders) > 0 {
+		// Compressed format detected - raw JSON payload + signature
+		var signature string
 		
 		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
 		components := &JWTComponents{
-			Static:    staticHeaders[0],
-			Session:   md.Get("x-jwt-session")[0],
-			Dynamic:   dynamic,
+			Payload:   payloadHeaders[0],
 			Signature: signature,
 		}
 
-		// Calculate actual compressed size (the size on the wire)
-		compressedSize := len(components.Static) + len(components.Session) + len(components.Dynamic) + len(components.Signature)
-
-		// Reassemble JWT from components
+        // Reassemble JWT from components (1 base64 encode operation)
 		reassembled, err := ReassembleJWT(components)
 		if err != nil {
 			log.Warnf("Failed to reassemble JWT: %v", err)
 			return handler(ctx, req) // Continue without JWT
 		}
 		jwtToken = reassembled
-		log.Infof("[JWT-FLOW] Checkout Service ← Frontend: Received compressed JWT (%d bytes compressed from %d bytes) via %s", compressedSize, len(jwtToken), info.FullMethod)
 
 	} else if authHeaders := md.Get("authorization"); len(authHeaders) > 0 {
 		// Standard format: "Bearer <token>"
 		jwtToken = strings.TrimPrefix(authHeaders[0], "Bearer ")
-		log.Infof("[JWT-FLOW] Checkout Service ← Frontend: Received full JWT (%d bytes) via %s", len(jwtToken), info.FullMethod)
-	}
-
-	// Store JWT in context for client interceptor to forward
+	}	// Store JWT in context for client interceptor to forward
 	if jwtToken != "" {
 		ctx = context.WithValue(ctx, ctxKeyJWT{}, jwtToken)
 	}
@@ -79,24 +64,17 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 
 	var jwtToken string
 
-	// Check for compressed JWT format
-	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
-		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-		// x-jwt-sig is base64 (original signature format)
-		var dynamic, signature string
-		
-		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
-			dynamic = dynamicHeaders[0]
-		}
+	// Check for compressed JWT format (x-jwt-payload header)
+	if payloadHeaders := md.Get("x-jwt-payload"); len(payloadHeaders) > 0 {
+		// Compressed format: raw JSON payload + signature
+		var signature string
 		
 		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
 		components := &JWTComponents{
-			Static:    staticHeaders[0],
-			Session:   md.Get("x-jwt-session")[0],
-			Dynamic:   dynamic,
+			Payload:   payloadHeaders[0],
 			Signature: signature,
 		}
 
@@ -138,35 +116,25 @@ func jwtUnaryClientInterceptor(ctx context.Context, method string, req, reply in
 
 	// Check if compression is enabled
 	if IsJWTCompressionEnabled() {
-		// Decompose JWT for HPACK compression
+		// Decompose JWT for optimized transmission (1 base64 decode)
 		components, err := DecomposeJWT(jwtToken)
 		if err != nil {
 			// Fallback to full JWT
 			log.Warnf("Failed to decompose JWT, using full token: %v", err)
 			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
-		} else {
-			// Forward as compressed headers
-			// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-			// x-jwt-sig is base64 (original signature format)
+        } else {
+			// Forward as compressed headers: raw JSON payload + signature
 			ctx = metadata.AppendToOutgoingContext(ctx,
-				"x-jwt-static", components.Static,
-				"x-jwt-session", components.Session,
-				"x-jwt-dynamic", components.Dynamic,
+				"x-jwt-payload", components.Payload,
 				"x-jwt-sig", components.Signature)
-			
-			sizes := GetJWTComponentSizes(components)
-			log.Infof("[JWT-FLOW] Checkout Service → %s: Forwarding compressed JWT (total=%db)", method, sizes["total"])
 		}
-	} else {
+    } else {
 		// JWT COMPRESSION DISABLED: Forward as standard authorization header
-		log.Infof("[JWT-FLOW] Checkout Service → %s: Forwarding full JWT in authorization header (%d bytes)", method, len(jwtToken))
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
 	}
 
 	return invoker(ctx, method, req, reply, cc, opts...)
-}
-
-// jwtStreamClientInterceptor forwards JWT from incoming request to outgoing gRPC stream calls
+}// jwtStreamClientInterceptor forwards JWT from incoming request to outgoing gRPC stream calls
 func jwtStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 	// Get JWT from context
 	jwtToken, ok := ctx.Value(ctxKeyJWT{}).(string)
@@ -180,20 +148,14 @@ func jwtStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *
 		if err != nil {
 			log.Warnf("Failed to decompose JWT for stream, using full token: %v", err)
 			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
-		} else {
-			// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-			// x-jwt-sig is base64 (original signature format)
+        } else {
+			// Forward as compressed headers: raw JSON payload + signature
 			ctx = metadata.AppendToOutgoingContext(ctx,
-				"x-jwt-static", components.Static,
-				"x-jwt-session", components.Session,
-				"x-jwt-dynamic", components.Dynamic,
+				"x-jwt-payload", components.Payload,
 				"x-jwt-sig", components.Signature)
-			
-			log.Infof("[JWT-FLOW] Checkout Service → %s (stream): Forwarding compressed JWT", method)
 		}
-	} else {
+    } else {
 		// JWT COMPRESSION DISABLED: Forward as standard authorization header
-		log.Infof("[JWT-FLOW] Checkout Service → %s (stream): Forwarding full JWT in authorization header (%d bytes)", method, len(jwtToken))
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
 	}
 

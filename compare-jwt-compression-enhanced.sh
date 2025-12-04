@@ -4,8 +4,8 @@
 # Compares performance and network metrics between JWT compression ON and OFF
 #
 
-ENABLED_DIR="jwt-compression-results-20251204_023958"
-DISABLED_DIR="jwt-compression-results-20251204_024632"
+ENABLED_DIR="jwt-compression-results-20251204_184908"
+DISABLED_DIR="jwt-compression-results-off-20251204_180709"
 
 # Colors for output
 RED='\033[0;31m'
@@ -191,16 +191,50 @@ else
                 echo "  Total traffic:     ${TOTAL_BYTES} bytes (${KB} KB)"
             fi
             
-            # Check for JWT headers
-            JWT_FRAMES=$(tshark -r "${PCAP}" -d tcp.port==7070,http2 -Y 'http2.header.name contains "jwt"' 2>/dev/null | wc -l)
+            # Check for JWT headers (new 2-header format: x-jwt-payload, x-jwt-sig)
+            JWT_PAYLOAD_FRAMES=$(tshark -r "${PCAP}" -d tcp.port==7070,http2 -Y 'http2.header.name == "x-jwt-payload"' 2>/dev/null | wc -l)
+            JWT_SIG_FRAMES=$(tshark -r "${PCAP}" -d tcp.port==7070,http2 -Y 'http2.header.name == "x-jwt-sig"' 2>/dev/null | wc -l)
             AUTH_FRAMES=$(tshark -r "${PCAP}" -d tcp.port==7070,http2 -Y 'http2.header.name == "authorization"' 2>/dev/null | wc -l)
             
-            echo "  JWT header frames: ${JWT_FRAMES}"
-            echo "  Auth header frames: ${AUTH_FRAMES}"
+            # Total JWT-related frames (either header present)
+            JWT_FRAMES=$((JWT_PAYLOAD_FRAMES > JWT_SIG_FRAMES ? JWT_PAYLOAD_FRAMES : JWT_SIG_FRAMES))
+            
+            echo "  x-jwt-payload frames: ${JWT_PAYLOAD_FRAMES}"
+            echo "  x-jwt-sig frames:     ${JWT_SIG_FRAMES}"
+            echo "  authorization frames: ${AUTH_FRAMES}"
             echo ""
+            
+            # Extract header sizes for HPACK analysis
+            if [ "$JWT_PAYLOAD_FRAMES" -gt 0 ]; then
+                echo "  ${CYAN}HPACK Header Analysis:${NC}"
+                # Get sample header values to analyze size
+                SAMPLE_PAYLOAD=$(tshark -r "${PCAP}" -d tcp.port==7070,http2 -Y 'http2.header.name == "x-jwt-payload"' -T fields -e http2.header.value 2>/dev/null | head -1)
+                SAMPLE_SIG=$(tshark -r "${PCAP}" -d tcp.port==7070,http2 -Y 'http2.header.name == "x-jwt-sig"' -T fields -e http2.header.value 2>/dev/null | head -1)
+                if [ ! -z "$SAMPLE_PAYLOAD" ]; then
+                    PAYLOAD_LEN=${#SAMPLE_PAYLOAD}
+                    echo "    x-jwt-payload size: ~${PAYLOAD_LEN} bytes (raw JSON)"
+                fi
+                if [ ! -z "$SAMPLE_SIG" ]; then
+                    SIG_LEN=${#SAMPLE_SIG}
+                    echo "    x-jwt-sig size:     ~${SIG_LEN} bytes (base64url)"
+                fi
+                echo ""
+            fi
+            
+            if [ "$AUTH_FRAMES" -gt 0 ]; then
+                echo "  ${CYAN}Authorization Header Analysis:${NC}"
+                SAMPLE_AUTH=$(tshark -r "${PCAP}" -d tcp.port==7070,http2 -Y 'http2.header.name == "authorization"' -T fields -e http2.header.value 2>/dev/null | head -1)
+                if [ ! -z "$SAMPLE_AUTH" ]; then
+                    AUTH_LEN=${#SAMPLE_AUTH}
+                    echo "    authorization size: ~${AUTH_LEN} bytes (full JWT)"
+                fi
+                echo ""
+            fi
             
             eval "${LABEL}_TOTAL_BYTES=$TOTAL_BYTES"
             eval "${LABEL}_JWT_FRAMES=$JWT_FRAMES"
+            eval "${LABEL}_JWT_PAYLOAD_FRAMES=$JWT_PAYLOAD_FRAMES"
+            eval "${LABEL}_JWT_SIG_FRAMES=$JWT_SIG_FRAMES"
             eval "${LABEL}_AUTH_FRAMES=$AUTH_FRAMES"
         }
         
@@ -235,12 +269,26 @@ echo "  JWT Header Analysis"
 echo -e "======================================================================${NC}"
 echo ""
 
+echo -e "${CYAN}Implementation Details:${NC}"
+echo "  Compression ON (2-header format):"
+echo "    • x-jwt-payload: Raw JSON payload (not base64 encoded)"
+echo "    • x-jwt-sig:     Base64url signature only"
+echo "    • JWT header:    Hardcoded constant (eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9)"
+echo ""
+echo "  Compression OFF (standard format):"
+echo "    • authorization: Bearer <header>.<payload>.<signature>"
+echo ""
 
-if [ ! -z "$ENABLED_JWT_FRAMES" ] && [ ! -z "$DISABLED_AUTH_FRAMES" ]; then
+if [ ! -z "$ENABLED_JWT_PAYLOAD_FRAMES" ] && [ ! -z "$DISABLED_AUTH_FRAMES" ]; then
     echo -e "${GREEN}Header Usage Verification:${NC}"
-    echo "  Compression ON:  $ENABLED_JWT_FRAMES frames with x-jwt-* headers"
-    echo "  Compression OFF: $DISABLED_AUTH_FRAMES frames with authorization header"
+    echo "  Compression ON:"
+    echo "    • x-jwt-payload frames: $ENABLED_JWT_PAYLOAD_FRAMES"
+    echo "    • x-jwt-sig frames:     $ENABLED_JWT_SIG_FRAMES"
+    echo "  Compression OFF:"
+    echo "    • authorization frames: $DISABLED_AUTH_FRAMES"
     echo ""
+    
+
 fi
 
 # ====================================================================
@@ -252,7 +300,7 @@ echo -e "======================================================================$
 echo ""
 
 if [ ! -z "$SENT_SAVINGS" ]; then
-    echo -e "${GREEN}✓ JWT Compression Results:${NC}"
+    echo -e "${GREEN}✓ JWT Compression Results (2-Header Format):${NC}"
     echo ""
     echo "  📊 Data Transfer:"
     echo "     • Upload bandwidth saved:   $SENT_SAVINGS%"
@@ -272,6 +320,12 @@ if [ ! -z "$SENT_SAVINGS" ]; then
     else
         echo "     • P95 response time:        Similar performance"
     fi
+    echo ""
+    echo "  🔧 Implementation Optimizations:"
+    echo "     • Operations reduced:       14 → 2 (86% reduction)"
+    echo "     • Headers sent:             4 → 2 (50% reduction)"
+    echo "     • JWT header:               Hardcoded (eliminated from wire)"
+    echo "     • Payload encoding:         Raw JSON (vs base64)"
 
 fi
 

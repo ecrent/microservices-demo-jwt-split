@@ -47,13 +47,8 @@ class HipsterShopServer {
    */
   static ChargeServiceHandler(call, callback) {
     try {
-      // Extract and log JWT
+      // Extract JWT (available for validation if needed)
       const jwt = reassembleJWT(call.metadata);
-      if (jwt) {
-        logger.info(`[JWT-FLOW] Payment Service ← Checkout: Received compressed JWT (${jwt.length} bytes) via PaymentService.Charge`);
-      } else {
-        logger.info('[JWT-FLOW] Payment Service: No JWT received in PaymentService.Charge');
-      }
 
       logger.info(`PaymentService#Charge invoked with request ${JSON.stringify(call.request)}`);
       const response = charge(call.request);

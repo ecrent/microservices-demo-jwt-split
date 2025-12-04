@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Authorization Header HPACK Indexing Analysis (Baseline Test)
+Authorization Header HPACK Indexing Analysis (Baseline - Compression OFF)
 Analyzes pcap files to determine how the authorization header is being indexed in HTTP/2 HPACK compression.
-This is for the baseline test without JWT header compression (single authorization header).
+This is for the baseline test without JWT header compression (single authorization header with full JWT).
+
+Comparison with 2-Header Format:
+- Baseline: authorization: Bearer <header.payload.signature>
+- Compressed: x-jwt-payload (raw JSON) + x-jwt-sig (signature only)
 """
 
 import subprocess
@@ -15,21 +19,35 @@ class AuthHeaderAnalyzer:
     def __init__(self, pcap_file):
         self.pcap_file = pcap_file
         self.header_stats = {
-            'authorization': {'literal': 0, 'indexed': 0, 'sessions': set()}
+            'authorization': {'literal': 0, 'indexed': 0, 'sizes': [], 'unique_values': set()}
         }
         self.total_frames = 0
         self.frames_with_auth = 0
         self.unique_sessions = set()
+        self.header_name_indexing = {'authorization': {'name_indexed': 0, 'name_literal': 0}}
+        # Track actual byte transmission for savings calculation
+        self.byte_tracking = {
+            'authorization': {
+                'literal_bytes_sent': 0,       # Actual bytes sent as literal
+                'indexed_references': 0,        # Number of indexed references (1-2 bytes each)
+                'first_occurrences': 0,         # First time a value was seen (must be literal)
+                'reused_from_table': 0,         # Successfully reused from dynamic table
+                'potential_bytes': 0,           # What would have been sent without any HPACK
+                'value_occurrences': {},        # Track each value's occurrence count
+            }
+        }
         
     def extract_grpc_headers(self):
-        """Extract gRPC frames with authorization header and their indexing info"""
+        """Extract HTTP/2 frames with authorization header and their indexing info"""
         print(f"Analyzing pcap file: {self.pcap_file}")
-        print("Extracting gRPC frames with authorization header and indexing details...")
+        print("Extracting HTTP/2 frames with authorization header and indexing details...")
+        print("Looking for header: authorization (Bearer JWT)")
         
         # Extract header names and their representation (indexed vs literal)
         cmd = [
             'tshark', '-r', self.pcap_file,
-            '-Y', 'grpc',
+            '-d', 'tcp.port==7070,http2',
+            '-Y', 'http2.header',
             '-T', 'fields',
             '-e', 'frame.number',
             '-e', 'http2.streamid',
@@ -91,7 +109,7 @@ class AuthHeaderAnalyzer:
         """Run the full analysis"""
         frames = self.extract_grpc_headers()
         
-        print(f"Processing {len(frames)} frames...")
+        print(f"Processing {len(frames)} lines of output...")
         
         frames_seen = set()
         
@@ -119,6 +137,11 @@ class AuthHeaderAnalyzer:
                     session_id = self.extract_session_id(auth_value)
                     if session_id:
                         self.unique_sessions.add(session_id)
+                    # Track value size and uniqueness
+                    self.header_stats['authorization']['sizes'].append(len(auth_value))
+                    import hashlib
+                    value_hash = hashlib.md5(auth_value.encode()).hexdigest()[:16]
+                    self.header_stats['authorization']['unique_values'].add(value_hash)
                     break
             
             # Check if frame has authorization header
@@ -131,18 +154,47 @@ class AuthHeaderAnalyzer:
                 
                 has_auth = True
                 
+                # Get value for byte tracking
+                value = auth_value if auth_value else ""
+                value_size = len(value)
+                name_size = len('authorization')
+                import hashlib
+                value_hash = hashlib.md5(value.encode()).hexdigest()[:16]
+                
+                # Track value occurrences
+                if value_hash not in self.byte_tracking['authorization']['value_occurrences']:
+                    self.byte_tracking['authorization']['value_occurrences'][value_hash] = 0
+                self.byte_tracking['authorization']['value_occurrences'][value_hash] += 1
+                occurrence_num = self.byte_tracking['authorization']['value_occurrences'][value_hash]
+                
+                # Potential bytes = what would be sent without HPACK (name + value + small overhead)
+                self.byte_tracking['authorization']['potential_bytes'] += name_size + value_size + 2
+                
                 # Check representation to determine if literal or indexed
                 rep = representations[i] if i < len(representations) else ""
                 
-                # "Indexed Header Field" = fully indexed (compressed)
-                # "Literal Header Field..." = literal transmission (not compressed from index)
-                if 'Indexed Header Field' == rep:
+                # HPACK representation types
+                if rep == 'Indexed Header Field':
                     self.header_stats['authorization']['indexed'] += 1
+                    self.header_name_indexing['authorization']['name_indexed'] += 1
+                    # Indexed = only 1-2 bytes sent for the index reference
+                    self.byte_tracking['authorization']['indexed_references'] += 1
+                    self.byte_tracking['authorization']['reused_from_table'] += 1
+                elif 'Incremental Indexing' in rep:
+                    self.header_stats['authorization']['literal'] += 1
+                    self.header_name_indexing['authorization']['name_indexed'] += 1
+                    # Literal with indexing = full value sent, but will be cached
+                    if occurrence_num == 1:
+                        self.byte_tracking['authorization']['first_occurrences'] += 1
+                    self.byte_tracking['authorization']['literal_bytes_sent'] += value_size + 2  # +2 for length prefix
                 elif 'Literal' in rep:
                     self.header_stats['authorization']['literal'] += 1
+                    self.header_name_indexing['authorization']['name_literal'] += 1
+                    self.byte_tracking['authorization']['literal_bytes_sent'] += name_size + value_size + 2
                 else:
-                    # Unknown representation, conservatively count as literal
                     self.header_stats['authorization']['literal'] += 1
+                    self.header_name_indexing['authorization']['name_literal'] += 1
+                    self.byte_tracking['authorization']['literal_bytes_sent'] += name_size + value_size + 2
             
             if has_auth:
                 self.frames_with_auth += 1
@@ -153,97 +205,127 @@ class AuthHeaderAnalyzer:
     def print_report(self):
         """Print the analysis report"""
         print("\n" + "=" * 80)
-        print("AUTHORIZATION HEADER HPACK INDEXING ANALYSIS REPORT (BASELINE)")
+        print("AUTHORIZATION HEADER HPACK INDEXING ANALYSIS (Baseline - Compression OFF)")
         print("=" * 80)
         print(f"\nPcap File: {self.pcap_file}")
         print(f"Total Frames Analyzed: {self.total_frames}")
         print(f"Frames with Authorization Header: {self.frames_with_auth}")
         print(f"Unique Sessions Detected: {len(self.unique_sessions)}")
+        
         print("\n" + "=" * 80)
         print("HEADER INDEXING STATISTICS")
         print("=" * 80)
         print()
-        print(f"{'Header':<25} {'Total Uses':<12} {'Literal':<10} {'Indexed':<10} {'Indexing Rate':<15}")
-        print("-" * 80)
         
         stats = self.header_stats['authorization']
         total = stats['literal'] + stats['indexed']
+        unique_count = len(stats['unique_values'])
         
         if total > 0:
             indexing_rate = (stats['indexed'] / total) * 100
         else:
             indexing_rate = 0.0
+        
+        print(f"{'Header':<20} {'Total':<10} {'Literal':<10} {'Indexed':<10} {'Index Rate':<12} {'Unique Values':<15}")
+        print("-" * 80)
+        print(f"{'authorization':<20} {total:<10} {stats['literal']:<10} {stats['indexed']:<10} {indexing_rate:>6.1f}%      {unique_count:<15}")
+        
+        print("\n" + "=" * 80)
+        print("HPACK DYNAMIC TABLE ANALYSIS")
+        print("=" * 80)
+        
+        # Header name indexing
+        name_stats = self.header_name_indexing['authorization']
+        name_total = name_stats['name_indexed'] + name_stats['name_literal']
+        if name_total > 0:
+            name_rate = (name_stats['name_indexed'] / name_total) * 100
+        else:
+            name_rate = 0.0
+        
+        print("\nHeader Name Indexing:")
+        print(f"  • 'authorization' name indexed: {name_stats['name_indexed']} ({name_rate:.1f}%)")
+        print(f"  • 'authorization' name literal: {name_stats['name_literal']}")
+        
+        # Value size statistics
+        sizes = stats['sizes']
+        if sizes:
+            min_size = min(sizes)
+            max_size = max(sizes)
+            avg_size = sum(sizes) / len(sizes)
+            print(f"\nHeader Value Size Statistics:")
+            print(f"  • Min size: {min_size} bytes")
+            print(f"  • Max size: {max_size} bytes")
+            print(f"  • Avg size: {avg_size:.1f} bytes")
+            print(f"  • Unique values: {unique_count}")
             
-        print(f"{'authorization':<25} {total:<12} {stats['literal']:<10} {stats['indexed']:<10} {indexing_rate:>6.1f}%")
+            # HPACK entry size calculation
+            entry_overhead = 32
+            entry_size = avg_size + len('authorization') + entry_overhead
+            print(f"\nEstimated HPACK Dynamic Table Entry Size:")
+            print(f"  • Entry size: ~{entry_size:.0f} bytes (value={avg_size:.0f} + name=13 + overhead=32)")
+            
+            # Table capacity analysis
+            default_table = 4096
+            large_table = 512 * 1024
+            entries_default = default_table / entry_size
+            entries_large = large_table / entry_size
+            print(f"\n  With default 4KB table: ~{entries_default:.1f} entries fit")
+            print(f"  With 512KB table: ~{entries_large:.0f} entries fit")
         
         print("\n" + "=" * 80)
-        print("COMPARISON WITH JWT COMPRESSION")
+        print("ACTUAL BYTE SAVINGS ANALYSIS")
         print("=" * 80)
         
-        print(f"""
-Baseline Test (Single Authorization Header):
-- Header count: 1 (authorization header with full JWT token)
-- Total uses: {total}
-- Literal transmissions: {stats['literal']}
-- Indexed transmissions: {stats['indexed']}
-- Indexing rate: {indexing_rate:.1f}%
-
-JWT Compression Test (4 Separate Headers):
-- Header count: 4 (x-jwt-static, x-jwt-session, x-jwt-dynamic, x-jwt-sig)
-- Expected indexing rates:
-  * x-jwt-static: ~81% (same for all users)
-  * x-jwt-session: ~20% (unique per user, table overflow)
-  * x-jwt-dynamic: ~20% (changes on rotation, table overflow)
-  * x-jwt-sig: ~20% (changes on rotation, table overflow)
-
-Key Differences:
-1. Baseline: Single large header vs Compressed: 4 separate headers
-2. Baseline: Entire JWT changes on rotation vs Compressed: Only 2 headers change
-3. Baseline: Lower indexing potential vs Compressed: Static header highly indexed
-        """)
+        bt = self.byte_tracking['authorization']
+        potential = bt['potential_bytes']
+        literal_sent = bt['literal_bytes_sent']
+        indexed_refs = bt['indexed_references']
+        indexed_bytes = indexed_refs * 2  # ~2 bytes per index reference
+        actual_sent = literal_sent + indexed_bytes
+        saved = potential - actual_sent
         
-        print("\n" + "=" * 80)
-        print("COMPRESSION BENEFITS ANALYSIS")
-        print("=" * 80)
+        print("\n" + "-" * 80)
+        print("Breakdown: How bytes were transmitted")
+        print("-" * 80)
+        print(f"{'Header':<20} {'Potential':<12} {'Literal Sent':<14} {'Indexed Refs':<14} {'Actual Sent':<14} {'Saved':<12}")
+        print("-" * 80)
+        print(f"{'authorization':<20} {potential:>10,}   {literal_sent:>12,}   {indexed_refs:>6} (~{indexed_bytes:>4})   {actual_sent:>12,}   {saved:>10,}")
         
-        # Estimated JWT token size (base64 encoded)
-        # Typical JWT: header.payload.signature
-        # With 256KB payload: ~350KB base64 encoded
-        jwt_size = 350000  # bytes (estimated for 256KB payload JWT)
+        if potential > 0:
+            compression_ratio = (1 - actual_sent / potential) * 100
+            print(f"\nOverall compression: {compression_ratio:.1f}% reduction ({potential:,} → {actual_sent:,} bytes)")
         
-        total_saved = stats['indexed'] * jwt_size
+        print("\n" + "-" * 80)
+        print("Indexing Efficiency Analysis")
+        print("-" * 80)
         
-        print(f"\nEstimated bandwidth savings from HPACK indexing:")
-        print(f"- JWT token size (estimated): ~{jwt_size:,} bytes (~{jwt_size/1024:.0f} KB)")
-        print(f"- Indexed transmissions: {stats['indexed']}")
-        print(f"- Total saved: ~{total_saved:,} bytes (~{total_saved/1024:.0f} KB, ~{total_saved/(1024*1024):.2f} MB)")
+        total_occurrences = self.header_stats['authorization']['literal'] + self.header_stats['authorization']['indexed']
+        unique_values = len(bt['value_occurrences'])
+        first_occ = bt['first_occurrences']
+        reused = bt['reused_from_table']
         
-        if self.frames_with_auth > 0:
-            avg_per_frame = total_saved / self.frames_with_auth
-            print(f"- Average savings per frame: ~{avg_per_frame:,.0f} bytes (~{avg_per_frame/1024:.1f} KB)")
+        print(f"\n  authorization:")
+        print(f"    • Total header occurrences: {total_occurrences}")
+        print(f"    • Unique values seen: {unique_values}")
+        print(f"    • First occurrences (must be literal): {first_occ}")
+        print(f"    • Reused from dynamic table (indexed): {reused}")
         
-        if len(self.unique_sessions) > 0:
-            avg_per_session = total_saved / len(self.unique_sessions)
-            print(f"- Average savings per session: ~{avg_per_session:,.0f} bytes (~{avg_per_session/1024:.1f} KB)")
+        if unique_values > 0:
+            reuse_rate = (total_occurrences - unique_values) / total_occurrences * 100 if total_occurrences > 0 else 0
+            print(f"    • Value reuse rate: {reuse_rate:.1f}% ({total_occurrences - unique_values} reuses of {total_occurrences} total)")
         
-        print("\n" + "=" * 80)
-        print("ANALYSIS NOTES")
-        print("=" * 80)
-        print("""
-1. LITERAL: Header transmitted with full name and value (first occurrence per session)
-2. INDEXED: Header referenced by index number from HPACK dynamic table
-3. Indexing Rate: Percentage of header uses that were indexed (higher is better)
-4. The authorization header contains the complete JWT token (header.payload.signature)
-5. Every JWT rotation requires sending the entire new token as literal
-6. With 400 concurrent users and large JWTs, dynamic table eviction is common
-
-Baseline Test Characteristics:
-- Uses standard "authorization: Bearer <jwt>" header format
-- Entire JWT token sent in single header
-- JWT rotation forces complete re-transmission of entire token
-- HPACK can index the entire token value if it fits in dynamic table
-- With 256KB JWT payload, token is ~350KB - may exceed HPACK table capacity
-        """)
+        if reused > 0 and total_occurrences > first_occ:
+            potential_reuses = total_occurrences - first_occ
+            if potential_reuses > 0:
+                hit_rate = reused / potential_reuses * 100
+                print(f"    • Cache hit rate: {hit_rate:.1f}% ({reused} hits of {potential_reuses} potential reuses)")
+        
+        # Show eviction analysis
+        evicted_reuses = (total_occurrences - unique_values) - reused
+        if evicted_reuses > 0:
+            print(f"    • Evicted before reuse: {evicted_reuses} (value was in table but got evicted)")
+        
+        print("\n" + "="*80)
 
 def main():
     import sys

@@ -18,56 +18,38 @@ func jwtUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.
 
 	var jwtToken string
 
-	// Check for compressed JWT format (x-jwt-* headers)
-	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
-		// Compressed format detected
-		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-		// x-jwt-sig is base64 (original signature format)
-		var dynamic, signature string
-		
-		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
-			dynamic = dynamicHeaders[0]
-		}
+	// Check for compressed JWT format (x-jwt-payload header)
+	if payloadHeaders := md.Get("x-jwt-payload"); len(payloadHeaders) > 0 {
+		// Compressed format: raw JSON payload + signature
+		var signature string
 		
 		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
 		components := &JWTComponents{
-			Static:    staticHeaders[0],
-			Session:   md.Get("x-jwt-session")[0],
-			Dynamic:   dynamic,
+			Payload:   payloadHeaders[0],
 			Signature: signature,
 		}
 
-		// Reassemble JWT from components
+        // Reassemble JWT from components (1 base64 encode operation)
 		reassembled, err := ReassembleJWT(components)
 		if err != nil {
 			log.Warnf("Failed to reassemble JWT: %v", err)
 			return handler(ctx, req) // Continue without JWT
 		}
 		jwtToken = reassembled
-		sizes := GetJWTComponentSizes(components)
-		log.Infof("[JWT-FLOW] Shipping Service ← Checkout: Received compressed JWT (%d bytes) via %s", sizes["total"], info.FullMethod)
 
 	} else if authHeaders := md.Get("authorization"); len(authHeaders) > 0 {
 		// Standard format: "Bearer <token>"
 		jwtToken = strings.TrimPrefix(authHeaders[0], "Bearer ")
-		log.Infof("[JWT-FLOW] Shipping Service ← Checkout: Received full JWT (%d bytes) via %s", len(jwtToken), info.FullMethod)
 	}
 
-	// JWT received and reassembled (no forwarding needed for shippingservice)
-	if jwtToken == "" {
-		// Don't log health checks - they're infrastructure probes
-		if !strings.Contains(info.FullMethod, "Health/Check") {
-			log.Infof("[JWT-FLOW] Shipping Service: No JWT received for %s", info.FullMethod)
-		}
-	}
+    // JWT received and reassembled (no forwarding needed for shippingservice)
+	_ = jwtToken // Silence unused variable warning
 
 	return handler(ctx, req)
-}
-
-// jwtStreamServerInterceptor extracts and reassembles JWT from incoming stream metadata
+}// jwtStreamServerInterceptor extracts and reassembles JWT from incoming stream metadata
 func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	ctx := ss.Context()
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -77,24 +59,17 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 
 	var jwtToken string
 
-	// Check for compressed JWT format
-	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
-		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
-		// x-jwt-sig is base64 (original signature format)
-		var dynamic, signature string
-		
-		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
-			dynamic = dynamicHeaders[0]
-		}
+	// Check for compressed JWT format (x-jwt-payload header)
+	if payloadHeaders := md.Get("x-jwt-payload"); len(payloadHeaders) > 0 {
+		// Compressed format: raw JSON payload + signature
+		var signature string
 		
 		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
 		components := &JWTComponents{
-			Static:    staticHeaders[0],
-			Session:   md.Get("x-jwt-session")[0],
-			Dynamic:   dynamic,
+			Payload:   payloadHeaders[0],
 			Signature: signature,
 		}
 
@@ -109,7 +84,7 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 	}
 
 	if jwtToken != "" {
-		log.Infof("JWT received for stream %s (compressed=%v)", info.FullMethod, len(md.Get("x-jwt-static")) > 0)
+		log.Infof("JWT received for stream %s (compressed=%v)", info.FullMethod, len(md.Get("x-jwt-payload")) > 0)
 	}
 
 	return handler(srv, ss)

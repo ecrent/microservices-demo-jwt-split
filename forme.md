@@ -58,3 +58,16 @@ Base64 decode	2	0	2
 JSON parse	2	3	5
 JSON serialize	3	2	5
 Base64 encode	0	2	2
+
+
+SENDER (1 operation):
+━━━━━━━━━━━━━━━━━━━━━
+1. Split JWT on "."
+2. Base64 decode parts[1]    ← ONLY OPERATION
+3. Send raw JSON + signature
+
+RECEIVER (1 operation):
+━━━━━━━━━━━━━━━━━━━━━━
+1. Read x-jwt-payload (raw JSON)
+2. Base64 encode payload     ← ONLY OPERATION
+3. Concatenate: HEADER64 + "." + payload64 + "." + sig
