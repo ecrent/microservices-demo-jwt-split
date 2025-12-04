@@ -32,11 +32,13 @@ namespace cartservice.interceptors
                 
                 if (sigHeader != null)
                 {
-                    // Reassemble JWT (not used currently, but available for future validation)
-                    _ = ReassembleJWT(payloadHeader.Value, sigHeader.Value);
+                    // Reassemble JWT for validation/claims extraction
+                    var jwt = ReassembleJWT(payloadHeader.Value, sigHeader.Value);
+                    // JWT available for use (validation, claims, etc.)
+                    _ = jwt;
                 }
             }
-            // Standard format handled implicitly (no action needed)
+            // Standard format: authorization header handled implicitly
 
             return await continuation(request, context);
         }

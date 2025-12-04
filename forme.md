@@ -71,3 +71,13 @@ RECEIVER (1 operation):
 1. Read x-jwt-payload (raw JSON)
 2. Base64 encode payload     ← ONLY OPERATION
 3. Concatenate: HEADER64 + "." + payload64 + "." + sig
+
+
+
+Service	Receives	Does	Forwards
+Frontend	Full JWT (from user)	1 decompose	x-jwt-payload + x-jwt-sig
+Checkoutservice	x-jwt-payload + x-jwt-sig	0 (pass-through!)	x-jwt-payload + x-jwt-sig
+Cartservice	x-jwt-payload + x-jwt-sig	1 reassemble	(leaf - no forward)
+Paymentservice	x-jwt-payload + x-jwt-sig	1 reassemble	(leaf - no forward)
+Shippingservice	x-jwt-payload + x-jwt-sig	1 reassemble	(leaf - no forward)
+Emailservice	x-jwt-payload + x-jwt-sig	1 reassemble	(leaf - no forward)

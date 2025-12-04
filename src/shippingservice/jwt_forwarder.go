@@ -32,11 +32,11 @@ func jwtUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.
 			Signature: signature,
 		}
 
-        // Reassemble JWT from components (1 base64 encode operation)
+		// Reassemble JWT from components (1 base64 encode operation)
 		reassembled, err := ReassembleJWT(components)
 		if err != nil {
 			log.Warnf("Failed to reassemble JWT: %v", err)
-			return handler(ctx, req) // Continue without JWT
+			return handler(ctx, req)
 		}
 		jwtToken = reassembled
 
@@ -45,11 +45,11 @@ func jwtUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.
 		jwtToken = strings.TrimPrefix(authHeaders[0], "Bearer ")
 	}
 
-    // JWT received and reassembled (no forwarding needed for shippingservice)
-	_ = jwtToken // Silence unused variable warning
+	// JWT available for validation/claims extraction if needed
+	_ = jwtToken
 
 	return handler(ctx, req)
-}// jwtStreamServerInterceptor extracts and reassembles JWT from incoming stream metadata
+}// jwtStreamServerInterceptor extracts JWT from incoming stream metadata
 func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	ctx := ss.Context()
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -61,7 +61,6 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 
 	// Check for compressed JWT format (x-jwt-payload header)
 	if payloadHeaders := md.Get("x-jwt-payload"); len(payloadHeaders) > 0 {
-		// Compressed format: raw JSON payload + signature
 		var signature string
 		
 		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
@@ -83,9 +82,8 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 		jwtToken = strings.TrimPrefix(authHeaders[0], "Bearer ")
 	}
 
-	if jwtToken != "" {
-		log.Infof("JWT received for stream %s (compressed=%v)", info.FullMethod, len(md.Get("x-jwt-payload")) > 0)
-	}
+	// JWT available for validation/claims extraction if needed
+	_ = jwtToken
 
 	return handler(srv, ss)
 }
