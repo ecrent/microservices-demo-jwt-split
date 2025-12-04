@@ -9,7 +9,7 @@ This project is based on **Google Cloud Platform's microservices-demo**:
 - **Original Purpose**: Demonstration of cloud-native microservices architecture and Google Cloud Platform services
 
 **Key Research Contributions**:
-1. Implementation of JWT compression using split headers (x-jwt-static, x-jwt-session, x-jwt-dynamic-bin, x-jwt-sig-bin)
+1. Implementation of JWT compression using split headers (x-jwt-static, x-jwt-session, x-jwt-dynamic, x-jwt-sig)
 2. Comparative performance analysis of compressed vs. uncompressed JWT tokens
 3. Network bandwidth optimization through HTTP/2 HPACK caching
 4. Load testing methodology for authentication overhead measurement

@@ -21,20 +21,15 @@ func jwtUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.
 	// Check for compressed JWT format (x-jwt-* headers)
 	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
 		// Compressed format detected
+		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+		// x-jwt-sig is base64 (original signature format)
 		var dynamic, signature string
 		
-		// Try to get -bin headers first (gRPC auto-decodes them)
-		if dynamicBinHeaders := md.Get("x-jwt-dynamic-bin"); len(dynamicBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			dynamic = dynamicBinHeaders[0]
-		} else if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
+		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
 			dynamic = dynamicHeaders[0]
 		}
 		
-		if sigBinHeaders := md.Get("x-jwt-sig-bin"); len(sigBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			signature = sigBinHeaders[0]
-		} else if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
+		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
@@ -84,20 +79,15 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 
 	// Check for compressed JWT format
 	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
+		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+		// x-jwt-sig is base64 (original signature format)
 		var dynamic, signature string
 		
-		// Try to get -bin headers first (gRPC auto-decodes them)
-		if dynamicBinHeaders := md.Get("x-jwt-dynamic-bin"); len(dynamicBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			dynamic = dynamicBinHeaders[0]
-		} else if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
+		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
 			dynamic = dynamicHeaders[0]
 		}
 		
-		if sigBinHeaders := md.Get("x-jwt-sig-bin"); len(sigBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			signature = sigBinHeaders[0]
-		} else if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
+		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		

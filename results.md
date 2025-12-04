@@ -85,8 +85,8 @@ JWT Compression ON:
   Uses 4 separate headers:
     • x-jwt-static       (112b) - Cacheable by HPACK
     • x-jwt-session      (168b) - Cacheable by HPACK
-    • x-jwt-dynamic-bin  (122b) - NOT cached (binary)
-    • x-jwt-sig-bin      (342b) - NOT cached (binary)
+    • x-jwt-dynamic      (122b) - Changes frequently
+    • x-jwt-sig          (342b) - Base64 signature
   Total: ~744 bytes first request
   After HPACK caching: ~470 bytes (static/session use indices)
 

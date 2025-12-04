@@ -189,12 +189,12 @@ Baseline Test (Single Authorization Header):
 - Indexing rate: {indexing_rate:.1f}%
 
 JWT Compression Test (4 Separate Headers):
-- Header count: 4 (x-jwt-static, x-jwt-session, x-jwt-dynamic-bin, x-jwt-sig-bin)
+- Header count: 4 (x-jwt-static, x-jwt-session, x-jwt-dynamic, x-jwt-sig)
 - Expected indexing rates:
   * x-jwt-static: ~81% (same for all users)
   * x-jwt-session: ~20% (unique per user, table overflow)
-  * x-jwt-dynamic-bin: ~20% (changes on rotation, table overflow)
-  * x-jwt-sig-bin: ~20% (changes on rotation, table overflow)
+  * x-jwt-dynamic: ~20% (changes on rotation, table overflow)
+  * x-jwt-sig: ~20% (changes on rotation, table overflow)
 
 Key Differences:
 1. Baseline: Single large header vs Compressed: 4 separate headers

@@ -27,32 +27,24 @@ namespace cartservice.interceptors
             if (staticHeader != null)
             {
                 // Compressed format detected - reassemble JWT
+                // x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+                // x-jwt-sig is base64 (original signature format)
                 var sessionHeader = context.RequestHeaders.First(h => h.Key == "x-jwt-session");
-                
-                // Dynamic and signature use -bin suffix with base64 encoding to prevent HPACK indexing
-                var dynamicHeaderBin = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-dynamic-bin");
-                var sigHeaderBin = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-sig-bin");
+                var dynamicHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-dynamic");
+                var sigHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-sig");
                 
                 string dynamicValue, sigValue;
                 
                 try
                 {
-                    // Decode binary headers (-bin suffix means gRPC treats them as binary)
-                    if (dynamicHeaderBin != null && sigHeaderBin != null)
+                    if (dynamicHeader != null && sigHeader != null)
                     {
-                        // gRPC C# automatically base64-decodes -bin headers, access with ValueBytes
-                        dynamicValue = Encoding.UTF8.GetString(dynamicHeaderBin.ValueBytes);
-                        sigValue = Encoding.UTF8.GetString(sigHeaderBin.ValueBytes);
-                        Console.WriteLine($"[JWT-DEBUG] Decoded -bin headers successfully (decoded from binary)");
+                        dynamicValue = dynamicHeader.Value;
+                        sigValue = sigHeader.Value;
                     }
                     else
                     {
-                        // Fallback to non-bin headers for backward compatibility
-                        var dynamicHeader = context.RequestHeaders.First(h => h.Key == "x-jwt-dynamic");
-                        var sigHeader = context.RequestHeaders.First(h => h.Key == "x-jwt-sig");
-                        dynamicValue = dynamicHeader.Value;
-                        sigValue = sigHeader.Value;
-                        Console.WriteLine($"[JWT-DEBUG] Using legacy non-bin headers");
+                        throw new Exception("Missing x-jwt-dynamic or x-jwt-sig headers");
                     }
                     
                     jwt = ReassembleJWT(staticHeader.Value, sessionHeader.Value, dynamicValue, sigValue);
@@ -64,7 +56,7 @@ namespace cartservice.interceptors
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[JWT-ERROR] Failed to decode -bin headers: {ex.Message}");
+                    Console.WriteLine($"[JWT-ERROR] Failed to read JWT headers: {ex.Message}");
                     jwt = null;
                 }
             }

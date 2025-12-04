@@ -16,8 +16,8 @@ class JWTHeaderAnalyzer:
         self.header_stats = {
             'x-jwt-static': {'literal': 0, 'indexed': 0, 'sessions': set()},
             'x-jwt-session': {'literal': 0, 'indexed': 0, 'sessions': set()},
-            'x-jwt-dynamic-bin': {'literal': 0, 'indexed': 0, 'sessions': set()},
-            'x-jwt-sig-bin': {'literal': 0, 'indexed': 0, 'sessions': set()}
+            'x-jwt-dynamic': {'literal': 0, 'indexed': 0, 'sessions': set()},
+            'x-jwt-sig': {'literal': 0, 'indexed': 0, 'sessions': set()}
         }
         self.total_frames = 0
         self.frames_with_jwt = 0
@@ -232,8 +232,8 @@ class JWTHeaderAnalyzer:
         sizes = {
             'x-jwt-static': 150,
             'x-jwt-session': 200,
-            'x-jwt-dynamic-bin': 220,
-            'x-jwt-sig-bin': 350
+            'x-jwt-dynamic': 220,
+            'x-jwt-sig': 350
         }
         
         total_saved = 0

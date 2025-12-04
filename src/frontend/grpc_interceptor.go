@@ -84,12 +84,14 @@ func jwtUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 				md := metadata.Pairs("authorization", "Bearer "+tokenStr)
 				ctx = metadata.NewOutgoingContext(ctx, md)
 			} else {
-				// Add compressed JWT headers with -bin suffix for dynamic components
+				// Add compressed JWT headers
+				// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+				// x-jwt-sig is base64 (original signature format)
 				md := metadata.Pairs(
 					"x-jwt-static", components.Static,
 					"x-jwt-session", components.Session,
-					"x-jwt-dynamic-bin", components.Dynamic,
-					"x-jwt-sig-bin", components.Signature,
+					"x-jwt-dynamic", components.Dynamic,
+					"x-jwt-sig", components.Signature,
 				)
 				ctx = metadata.NewOutgoingContext(ctx, md)
 				sizes := GetJWTComponentSizes(components)
@@ -139,11 +141,13 @@ func jwtStreamClientInterceptor() grpc.StreamClientInterceptor {
 				ctx = metadata.NewOutgoingContext(ctx, md)
 			} else {
 				// Add compressed JWT headers
+				// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+				// x-jwt-sig is base64 (original signature format)
 				md := metadata.Pairs(
 					"x-jwt-static", components.Static,
 					"x-jwt-session", components.Session,
-					"x-jwt-dynamic-bin", components.Dynamic,
-					"x-jwt-sig-bin", components.Signature,
+					"x-jwt-dynamic", components.Dynamic,
+					"x-jwt-sig", components.Signature,
 				)
 				ctx = metadata.NewOutgoingContext(ctx, md)
 				log.Infof("[JWT-FLOW] Frontend → %s (stream): Sending DECOMPOSED JWT", method)

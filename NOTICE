@@ -43,7 +43,7 @@ Original Work:
        - forme.md
     
     6. Modified service implementations to support:
-       - JWT compression using x-jwt-static, x-jwt-session, x-jwt-dynamic-bin, x-jwt-sig-bin headers
+       - JWT compression using x-jwt-static, x-jwt-session, x-jwt-dynamic, x-jwt-sig headers
        - Traditional JWT using Authorization: Bearer header
        - Performance comparison and metrics collection
 

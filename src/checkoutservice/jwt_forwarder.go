@@ -24,22 +24,15 @@ func jwtUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.
 	// Check for compressed JWT format (x-jwt-* headers)
 	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
 		// Compressed format detected
+		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+		// x-jwt-sig is base64 (original signature format)
 		var dynamic, signature string
 		
-		// Try to get -bin headers first (gRPC auto-decodes them)
-		if dynamicBinHeaders := md.Get("x-jwt-dynamic-bin"); len(dynamicBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			dynamic = dynamicBinHeaders[0]
-		} else if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
-			// Fallback to non-bin headers for backward compatibility
+		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
 			dynamic = dynamicHeaders[0]
 		}
 		
-		if sigBinHeaders := md.Get("x-jwt-sig-bin"); len(sigBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			signature = sigBinHeaders[0]
-		} else if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
-			// Fallback to non-bin headers for backward compatibility
+		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
@@ -88,20 +81,15 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 
 	// Check for compressed JWT format
 	if staticHeaders := md.Get("x-jwt-static"); len(staticHeaders) > 0 {
+		// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+		// x-jwt-sig is base64 (original signature format)
 		var dynamic, signature string
 		
-		// Try to get -bin headers first (gRPC auto-decodes them)
-		if dynamicBinHeaders := md.Get("x-jwt-dynamic-bin"); len(dynamicBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			dynamic = dynamicBinHeaders[0]
-		} else if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
+		if dynamicHeaders := md.Get("x-jwt-dynamic"); len(dynamicHeaders) > 0 {
 			dynamic = dynamicHeaders[0]
 		}
 		
-		if sigBinHeaders := md.Get("x-jwt-sig-bin"); len(sigBinHeaders) > 0 {
-			// gRPC automatically base64-decodes -bin headers
-			signature = sigBinHeaders[0]
-		} else if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
+		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
@@ -157,18 +145,17 @@ func jwtUnaryClientInterceptor(ctx context.Context, method string, req, reply in
 			log.Warnf("Failed to decompose JWT, using full token: %v", err)
 			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
 		} else {
-			// Forward as compressed headers with -bin suffix for dynamic components
-			// gRPC automatically base64-encodes -bin headers, send raw string
-			
-			// Static and Session: Allow HPACK caching
+			// Forward as compressed headers
+			// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+			// x-jwt-sig is base64 (original signature format)
 			ctx = metadata.AppendToOutgoingContext(ctx,
 				"x-jwt-static", components.Static,
 				"x-jwt-session", components.Session,
-				"x-jwt-dynamic-bin", components.Dynamic,
-				"x-jwt-sig-bin", components.Signature)
+				"x-jwt-dynamic", components.Dynamic,
+				"x-jwt-sig", components.Signature)
 			
 			sizes := GetJWTComponentSizes(components)
-			log.Infof("[JWT-FLOW] Checkout Service \u2192 %s: Forwarding compressed JWT (total=%db, static/session=CACHED, dynamic/sig=NO-CACHE via -bin)", method, sizes["total"])
+			log.Infof("[JWT-FLOW] Checkout Service → %s: Forwarding compressed JWT (total=%db)", method, sizes["total"])
 		}
 	} else {
 		// JWT COMPRESSION DISABLED: Forward as standard authorization header
@@ -194,15 +181,15 @@ func jwtStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *
 			log.Warnf("Failed to decompose JWT for stream, using full token: %v", err)
 			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
 		} else {
-			// gRPC automatically base64-encodes -bin headers, send raw string
-			
+			// x-jwt-static, x-jwt-session, x-jwt-dynamic are JSON format
+			// x-jwt-sig is base64 (original signature format)
 			ctx = metadata.AppendToOutgoingContext(ctx,
 				"x-jwt-static", components.Static,
 				"x-jwt-session", components.Session,
-				"x-jwt-dynamic-bin", components.Dynamic,
-				"x-jwt-sig-bin", components.Signature)
+				"x-jwt-dynamic", components.Dynamic,
+				"x-jwt-sig", components.Signature)
 			
-			log.Infof("[JWT-FLOW] Checkout Service → %s (stream): Forwarding compressed JWT (static/session=CACHED, dynamic/sig=NO-CACHE via -bin)", method)
+			log.Infof("[JWT-FLOW] Checkout Service → %s (stream): Forwarding compressed JWT", method)
 		}
 	} else {
 		// JWT COMPRESSION DISABLED: Forward as standard authorization header

@@ -27,8 +27,8 @@ echo "Frontend pod: ${FRONTEND_POD}"
 echo "Cart service pod: ${CARTSERVICE_POD}"
 echo ""
 
-# Check if port-forward is already running
-if ! pgrep -f "kubectl.*port-forward.*8080:8080" > /dev/null; then
+# Check if port-forward is already running (check for port 8080 being used)
+if ! pgrep -f "kubectl.*port-forward.*8080" > /dev/null; then
     echo "Starting port-forward to frontend service..."
     kubectl port-forward service/frontend 8080:80 > /dev/null 2>&1 &
     PORT_FORWARD_PID=$!
