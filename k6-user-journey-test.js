@@ -12,11 +12,11 @@ const responseSize = new Trend('response_size_bytes');
 
 export const options = {
   stages: [
-    { duration: '60s', target: 200 },  // Ramp up to 200 users over 60s
-    { duration: '180s', target: 200 }, // Stay at 200 users for 180s (allows for 125s wait + operations)
+    { duration: '60s', target: 300 },  // Ramp up to 200 users over 60s
+    { duration: '180s', target: 300 }, // Stay at 200 users for 180s (allows for 125s wait + operations)
   ],
   thresholds: {
-    http_req_failed: ['rate<0.01'], // Less than 1% errors (increased due to service outage test)
+    http_req_failed: ['rate==0'], // 0% errors - all requests must succeed
     http_req_duration: ['p(95)<2000'], // 95% of requests under 2s
   },
 };
@@ -36,9 +36,10 @@ const PRODUCT_IDS = [
   '6E92ZMYYFZ', // Air Plant
 ];
 
-function getRandomProduct() {
-  return PRODUCT_IDS[Math.floor(Math.random() * PRODUCT_IDS.length)];
-}
+// Use fixed products for consistent, reproducible test results
+const PRODUCT_1 = PRODUCT_IDS[0]; // Sunglasses
+const PRODUCT_2 = PRODUCT_IDS[1]; // Tank Top
+const PRODUCT_3 = PRODUCT_IDS[2]; // Watch
 
 function extractCookies(response) {
   const cookies = {};
@@ -115,14 +116,11 @@ export default function () {
   // ========================================
   console.log(`[VU ${__VU}] Phase 2: Adding items to cart (JWT #1)`);
   
-  const product1 = getRandomProduct();
-  const product2 = getRandomProduct();
-  
-  // Add first item
+  // Add first item (Sunglasses)
   response = http.post(
     `${BASE_URL}/cart`,
     {
-      product_id: product1,
+      product_id: PRODUCT_1,
       quantity: '1',
     },
     {
@@ -141,11 +139,11 @@ export default function () {
   
   sleep(1);
   
-  // Add second item
+  // Add second item (Tank Top)
   response = http.post(
     `${BASE_URL}/cart`,
     {
-      product_id: product2,
+      product_id: PRODUCT_2,
       quantity: '2',
     },
     {
@@ -246,12 +244,11 @@ export default function () {
   // ========================================
   console.log(`[VU ${__VU}] Phase 5: Adding item with new JWT`);
   
-  const product3 = getRandomProduct();
-  
+  // Add third item (Watch)
   response = http.post(
     `${BASE_URL}/cart`,
     {
-      product_id: product3,
+      product_id: PRODUCT_3,
       quantity: '1',
     },
     {
