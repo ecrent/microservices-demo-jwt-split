@@ -12,9 +12,8 @@ namespace cartservice.interceptors
 {
     public class JwtLoggingInterceptor : Interceptor
     {
-        // JWT Header constant - RS256 algorithm, JWT type
-        // Base64URL encoded: {"alg":"RS256","typ":"JWT"}
-        private const string JWTHeaderB64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+        // Note: JWT header is always transmitted via x-jwt-header
+        // No default header - supports all IdPs (Auth0, Okta, Azure, Google with kid/jku/x5t)
         
         // Threshold for using stackalloc vs ArrayPool (512 bytes is safe for stack)
         private const int StackAllocThreshold = 512;
@@ -31,13 +30,14 @@ namespace cartservice.interceptors
             var payloadHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-payload");
             if (payloadHeader != null)
             {
-                // Compressed format: raw JSON payload + signature
+                // Compressed format: header + raw JSON payload + signature
+                var headerHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-header");
                 var sigHeader = context.RequestHeaders.FirstOrDefault(h => h.Key == "x-jwt-sig");
                 
-                if (sigHeader != null)
+                if (sigHeader != null && headerHeader != null)
                 {
                     // Reassemble JWT for validation/claims extraction
-                    var jwt = ReassembleJWT(payloadHeader.Value, sigHeader.Value);
+                    var jwt = ReassembleJWT(headerHeader.Value, payloadHeader.Value, sigHeader.Value);
                     // JWT available for use (validation, claims, etc.)
                     _ = jwt;
                 }
@@ -48,11 +48,11 @@ namespace cartservice.interceptors
         }
 
         /// <summary>
-        /// Reassemble JWT from raw JSON payload and signature.
+        /// Reassemble JWT from header, raw JSON payload, and signature.
         /// Operations: 1 base64 encode (payload only)
         /// Optimized to minimize string allocations.
         /// </summary>
-        private string ReassembleJWT(string payloadJson, string signature)
+        private string ReassembleJWT(string headerB64, string payloadJson, string signature)
         {
             // Get payload bytes
             int byteCount = Encoding.UTF8.GetByteCount(payloadJson);
@@ -71,8 +71,8 @@ namespace cartservice.interceptors
                 string payloadB64 = Base64UrlEncodeOptimized(payloadBytes);
                 
                 // Use string.Create for efficient concatenation (single allocation)
-                int totalLength = JWTHeaderB64.Length + 1 + payloadB64.Length + 1 + signature.Length;
-                return string.Create(totalLength, (JWTHeaderB64, payloadB64, signature), (span, state) =>
+                int totalLength = headerB64.Length + 1 + payloadB64.Length + 1 + signature.Length;
+                return string.Create(totalLength, (headerB64, payloadB64, signature), (span, state) =>
                 {
                     int pos = 0;
                     state.Item1.AsSpan().CopyTo(span);

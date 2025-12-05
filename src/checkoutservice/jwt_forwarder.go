@@ -12,6 +12,7 @@ import (
 type ctxKeyJWT struct{}
 
 // Context keys for storing compressed JWT components (pass-through optimization)
+type ctxKeyJWTHeader struct{}   // Original header (base64url, for IdP compatibility)
 type ctxKeyJWTPayload struct{}  // Raw JSON payload - can be parsed directly!
 type ctxKeyJWTSig struct{}
 
@@ -30,13 +31,19 @@ func jwtUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.
 		// Compressed format: pass through directly without reassembly!
 		// OPTIMIZATION: x-jwt-payload is raw JSON - can parse claims directly if needed
 		// No base64 decode required for claims access!
-		var signature string
+		var header, signature string
+		
+		// Read header (for IdP compatibility with kid, jku, etc.)
+		if headerHeaders := md.Get("x-jwt-header"); len(headerHeaders) > 0 {
+			header = headerHeaders[0]
+		}
 		
 		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
 		// Store components directly for pass-through forwarding
+		ctx = context.WithValue(ctx, ctxKeyJWTHeader{}, header)
 		ctx = context.WithValue(ctx, ctxKeyJWTPayload{}, payloadHeaders[0])
 		ctx = context.WithValue(ctx, ctxKeyJWTSig{}, signature)
 
@@ -65,13 +72,19 @@ func jwtStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grp
 	// Check for compressed JWT format (x-jwt-payload header)
 	if payloadHeaders := md.Get("x-jwt-payload"); len(payloadHeaders) > 0 {
 		// OPTIMIZATION: Pass through directly without reassembly
-		var signature string
+		var header, signature string
+		
+		// Read header (for IdP compatibility with kid, jku, etc.)
+		if headerHeaders := md.Get("x-jwt-header"); len(headerHeaders) > 0 {
+			header = headerHeaders[0]
+		}
 		
 		if sigHeaders := md.Get("x-jwt-sig"); len(sigHeaders) > 0 {
 			signature = sigHeaders[0]
 		}
 		
 		// Store components directly for pass-through
+		ctx = context.WithValue(ctx, ctxKeyJWTHeader{}, header)
 		ctx = context.WithValue(ctx, ctxKeyJWTPayload{}, payloadHeaders[0])
 		ctx = context.WithValue(ctx, ctxKeyJWTSig{}, signature)
 	} else if authHeaders := md.Get("authorization"); len(authHeaders) > 0 {
@@ -99,14 +112,24 @@ func jwtUnaryClientInterceptor(ctx context.Context, method string, req, reply in
 	// OPTIMIZATION: Check for pre-decomposed components first (pass-through)
 	// This avoids the reassemble-then-decompose round-trip
 	if IsJWTCompressionEnabled() {
+		header, _ := ctx.Value(ctxKeyJWTHeader{}).(string)
 		payload, payloadOk := ctx.Value(ctxKeyJWTPayload{}).(string)
 		sig, sigOk := ctx.Value(ctxKeyJWTSig{}).(string)
 		
 		if payloadOk && sigOk && payload != "" {
 			// Direct pass-through - ZERO encode/decode operations!
-			ctx = metadata.AppendToOutgoingContext(ctx,
-				"x-jwt-payload", payload,
-				"x-jwt-sig", sig)
+			// Forward all 3 headers: header + payload + signature
+			// Note: header may be empty if not provided, receiver will use default
+			if header != "" {
+				ctx = metadata.AppendToOutgoingContext(ctx,
+					"x-jwt-header", header,
+					"x-jwt-payload", payload,
+					"x-jwt-sig", sig)
+			} else {
+				ctx = metadata.AppendToOutgoingContext(ctx,
+					"x-jwt-payload", payload,
+					"x-jwt-sig", sig)
+			}
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
 	}
@@ -127,8 +150,9 @@ func jwtUnaryClientInterceptor(ctx context.Context, method string, req, reply in
 			log.Warnf("Failed to decompose JWT, using full token: %v", err)
 			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
         } else {
-			// Forward as compressed headers: raw JSON payload + signature
+			// Forward as compressed headers: header + raw JSON payload + signature
 			ctx = metadata.AppendToOutgoingContext(ctx,
+				"x-jwt-header", components.Header,
 				"x-jwt-payload", components.Payload,
 				"x-jwt-sig", components.Signature)
 		}
@@ -144,14 +168,22 @@ func jwtUnaryClientInterceptor(ctx context.Context, method string, req, reply in
 func jwtStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 	// OPTIMIZATION: Check for pre-decomposed components first (pass-through)
 	if IsJWTCompressionEnabled() {
+		header, _ := ctx.Value(ctxKeyJWTHeader{}).(string)
 		payload, payloadOk := ctx.Value(ctxKeyJWTPayload{}).(string)
 		sig, sigOk := ctx.Value(ctxKeyJWTSig{}).(string)
 		
 		if payloadOk && sigOk && payload != "" {
 			// Direct pass-through - ZERO encode/decode operations!
-			ctx = metadata.AppendToOutgoingContext(ctx,
-				"x-jwt-payload", payload,
-				"x-jwt-sig", sig)
+			if header != "" {
+				ctx = metadata.AppendToOutgoingContext(ctx,
+					"x-jwt-header", header,
+					"x-jwt-payload", payload,
+					"x-jwt-sig", sig)
+			} else {
+				ctx = metadata.AppendToOutgoingContext(ctx,
+					"x-jwt-payload", payload,
+					"x-jwt-sig", sig)
+			}
 			return streamer(ctx, desc, cc, method, opts...)
 		}
 	}
@@ -169,8 +201,9 @@ func jwtStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *
 			log.Warnf("Failed to decompose JWT for stream, using full token: %v", err)
 			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwtToken)
         } else {
-			// Forward as compressed headers: raw JSON payload + signature
+			// Forward as compressed headers: header + raw JSON payload + signature
 			ctx = metadata.AppendToOutgoingContext(ctx,
+				"x-jwt-header", components.Header,
 				"x-jwt-payload", components.Payload,
 				"x-jwt-sig", components.Signature)
 		}

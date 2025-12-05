@@ -1,5 +1,5 @@
 """JWT Compression Library for Python
-Optimized: only 2 components (payload + signature), hardcoded header
+3-header design: header + payload + signature for IdP compatibility
 """
 
 import json
@@ -9,9 +9,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# JWT Header constant - RS256 algorithm, JWT type
-# Base64URL encoded: {"alg":"RS256","typ":"JWT"}
-JWT_HEADER_B64 = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9'
+# Note: JWT header is always transmitted via x-jwt-header
+# No default header - supports all IdPs (Auth0, Okta, Azure, Google with kid/jku/x5t)
 
 
 def is_jwt_compression_enabled():
@@ -42,7 +41,7 @@ def decompose_jwt(jwt):
         jwt (str): Full JWT token
         
     Returns:
-        dict: Dictionary with payload (raw JSON) and signature
+        dict: Dictionary with header, payload (raw JSON), and signature
     
     Operations: 1 base64 decode (payload only)
     """
@@ -61,13 +60,10 @@ def decompose_jwt(jwt):
         payload_json = base64url_decode(payload_b64).decode('utf-8')
         
         result = {
+            'header': header_b64,         # Keep as-is (supports IdPs with kid, jku, etc.)
             'payload': payload_json,      # Raw JSON (~25% smaller than base64)
             'signature': signature_b64    # Keep as-is
         }
-        
-        logger.debug(
-            f'JWT decomposed: payload={len(payload_json)}b, sig={len(signature_b64)}b'
-        )
         
         return result
         
@@ -77,7 +73,7 @@ def decompose_jwt(jwt):
 
 
 def reassemble_jwt(metadata):
-    """Reassemble JWT from raw JSON payload and signature
+    """Reassemble JWT from header, raw JSON payload, and signature
     
     Args:
         metadata: gRPC metadata tuple list
@@ -97,14 +93,15 @@ def reassemble_jwt(metadata):
     # Check for compressed JWT components (new format)
     payload_header = metadata_dict.get('x-jwt-payload')
     signature = metadata_dict.get('x-jwt-sig')
+    header_b64 = metadata_dict.get('x-jwt-header')
     
-    if payload_header and signature:
+    if payload_header and signature and header_b64:
         try:
             # Base64url encode the raw JSON payload - ONLY OPERATION
             payload_b64 = base64url_encode(payload_header)
             
-            # Reassemble JWT using hardcoded header constant
-            jwt = f'{JWT_HEADER_B64}.{payload_b64}.{signature}'
+            # Reassemble JWT using original header
+            jwt = f'{header_b64}.{payload_b64}.{signature}'
             
             return jwt
             
@@ -116,7 +113,6 @@ def reassemble_jwt(metadata):
     auth_header = metadata_dict.get('authorization')
     if auth_header and auth_header.startswith('Bearer '):
         jwt = auth_header[7:]
-        logger.debug(f'JWT extracted from authorization header ({len(jwt)} bytes)')
         return jwt
     
     return None
@@ -140,9 +136,7 @@ def add_compressed_jwt(metadata, jwt):
         metadata.append(('authorization', f'Bearer {jwt}'))
         return
     
-    # Add compressed components: raw JSON payload + signature
+    # Add compressed components: header + raw JSON payload + signature
+    metadata.append(('x-jwt-header', components['header']))
     metadata.append(('x-jwt-payload', components['payload']))
     metadata.append(('x-jwt-sig', components['signature']))
-    
-    total_size = len(components['payload']) + len(components['signature'])
-    logger.debug(f'Forwarding compressed JWT: payload={len(components["payload"])}b, sig={len(components["signature"])}b')

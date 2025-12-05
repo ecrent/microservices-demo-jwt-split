@@ -84,10 +84,12 @@ func jwtUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 				md := metadata.Pairs("authorization", "Bearer "+tokenStr)
 				ctx = metadata.NewOutgoingContext(ctx, md)
 			} else {
-                // Send as 2 headers: raw JSON payload + signature
+                // Send as 3 headers: header + raw JSON payload + signature
+				// x-jwt-header is base64url (original, for IdP compatibility)
 				// x-jwt-payload is raw JSON (~25% smaller than base64)
-				// x-jwt-sig is base64 (original signature format)
+				// x-jwt-sig is base64url (original signature format)
 				md := metadata.Pairs(
+					"x-jwt-header", components.Header,
 					"x-jwt-payload", components.Payload,
 					"x-jwt-sig", components.Signature,
 				)
@@ -133,10 +135,12 @@ func jwtStreamClientInterceptor() grpc.StreamClientInterceptor {
 				md := metadata.Pairs("authorization", "Bearer "+tokenStr)
 				ctx = metadata.NewOutgoingContext(ctx, md)
 			} else {
-                // Send as 2 headers: raw JSON payload + signature
+                // Send as 3 headers: header + raw JSON payload + signature
+				// x-jwt-header is base64url (original, for IdP compatibility)
 				// x-jwt-payload is raw JSON (~25% smaller than base64)
-				// x-jwt-sig is base64 (original signature format)
+				// x-jwt-sig is base64url (original signature format)
 				md := metadata.Pairs(
+					"x-jwt-header", components.Header,
 					"x-jwt-payload", components.Payload,
 					"x-jwt-sig", components.Signature,
 				)

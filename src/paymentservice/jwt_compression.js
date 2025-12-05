@@ -1,11 +1,10 @@
 // JWT Compression Library for Node.js
-// Optimized: only 2 components (payload + signature), hardcoded header
+// 3-header design: header + payload + signature for IdP compatibility
 
 const logger = require('./logger');
 
-// JWT Header constant - RS256 algorithm, JWT type
-// Base64URL encoded: {"alg":"RS256","typ":"JWT"}
-const JWT_HEADER_B64 = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9';
+// Note: JWT header is always transmitted via x-jwt-header
+// No default header - supports all IdPs (Auth0, Okta, Azure, Google with kid/jku/x5t)
 
 /**
  * Check if JWT compression is enabled via environment variable
@@ -17,7 +16,7 @@ function isJWTCompressionEnabled() {
 /**
  * Decompose JWT for optimized transmission
  * @param {string} jwt - Full JWT token
- * @returns {Object} Object with payload (raw JSON) and signature
+ * @returns {Object} Object with header, payload (raw JSON), and signature
  * Operations: 1 base64 decode (payload only)
  */
 function decomposeJWT(jwt) {
@@ -38,11 +37,10 @@ function decomposeJWT(jwt) {
     const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
 
     const result = {
+      header: headerB64,       // Keep as-is (supports IdPs with kid, jku, etc.)
       payload: payloadJson,    // Raw JSON (~25% smaller than base64)
       signature: signatureB64  // Keep as-is
     };
-
-    logger.debug(`JWT decomposed: payload=${payloadJson.length}b, sig=${signatureB64.length}b`);
 
     return result;
   } catch (err) {
@@ -52,8 +50,8 @@ function decomposeJWT(jwt) {
 }
 
 /**
- * Reassemble JWT from raw JSON payload and signature
- * @param {Object} metadata - gRPC metadata object containing x-jwt-payload and x-jwt-sig headers
+ * Reassemble JWT from header, raw JSON payload, and signature
+ * @param {Object} metadata - gRPC metadata object containing x-jwt-header, x-jwt-payload, and x-jwt-sig headers
  * @returns {string|null} Reassembled JWT or null
  * Operations: 1 base64 encode (payload only)
  */
@@ -62,13 +60,15 @@ function reassembleJWT(metadata) {
   const payloadHeader = getMetadataValue(metadata, 'x-jwt-payload');
   const signature = getMetadataValue(metadata, 'x-jwt-sig');
 
-  if (payloadHeader && signature) {
+  const headerB64 = getMetadataValue(metadata, 'x-jwt-header');
+  
+  if (payloadHeader && signature && headerB64) {
     try {
       // Base64url encode the raw JSON payload - ONLY OPERATION
       const payloadB64 = Buffer.from(payloadHeader, 'utf8').toString('base64url');
 
-      // Reassemble JWT using hardcoded header constant
-      const jwt = `${JWT_HEADER_B64}.${payloadB64}.${signature}`;
+      // Reassemble JWT using original header
+      const jwt = `${headerB64}.${payloadB64}.${signature}`;
 
       return jwt;
     } catch (err) {
@@ -131,12 +131,10 @@ function addCompressedJWT(metadata, jwt) {
     return;
   }
 
-  // Add compressed components: raw JSON payload + signature
+  // Add compressed components: header + raw JSON payload + signature
+  metadata.set('x-jwt-header', components.header);
   metadata.set('x-jwt-payload', components.payload);
   metadata.set('x-jwt-sig', components.signature);
-
-  const totalSize = components.payload.length + components.signature.length;
-  logger.debug(`Forwarding compressed JWT: payload=${components.payload.length}b, sig=${components.signature.length}b`);
 }
 
 module.exports = {
@@ -144,6 +142,5 @@ module.exports = {
   decomposeJWT,
   reassembleJWT,
   addCompressedJWT,
-  getMetadataValue,
-  JWT_HEADER_B64
+  getMetadataValue
 };
