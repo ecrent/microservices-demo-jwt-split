@@ -4,8 +4,8 @@
 # Compares performance and network metrics between JWT compression ON and OFF
 #
 
-ENABLED_DIR="jwt-compression-400-on-results-20251205_074543"
-DISABLED_DIR="jwt-compression-400-off-results-20251205_075619"
+ENABLED_DIR="jwt-compression-400-on-codepsaces-results-20251205_172135"
+DISABLED_DIR="jwt-compression-400-off-codespaces-results-20251205_173032"
 
 # Colors for output
 RED='\033[0;31m'

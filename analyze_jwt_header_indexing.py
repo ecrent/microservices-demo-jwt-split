@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-JWT Header HPACK Indexing Analysis (2-Header Format)
+JWT Header HPACK Indexing Analysis (3-Header Format) - Version 2
 Analyzes pcap files to determine how JWT headers are being indexed in HTTP/2 HPACK compression.
 
-New 2-Header Format:
+3-Header Format:
+- x-jwt-header: Base64url encoded JWT header (constant: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9)
 - x-jwt-payload: Raw JSON payload (not base64 encoded)
 - x-jwt-sig: Base64url signature only
-- JWT header is hardcoded constant (not transmitted)
+
+This version properly handles the tshark output by processing each header individually.
 """
 
 import subprocess
@@ -14,29 +16,45 @@ import re
 import json
 from collections import defaultdict
 from pathlib import Path
+import hashlib
+
+# Constants for identifying JWT header values
+JWT_HEADER_CONSTANT = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9'
 
 class JWTHeaderAnalyzer:
     def __init__(self, pcap_file):
         self.pcap_file = pcap_file
-        # New 2-header format
+        # 3-header format: x-jwt-header, x-jwt-payload, x-jwt-sig
         self.header_stats = {
+            'x-jwt-header': {'literal': 0, 'indexed': 0, 'sizes': [], 'unique_values': set()},
             'x-jwt-payload': {'literal': 0, 'indexed': 0, 'sizes': [], 'unique_values': set()},
             'x-jwt-sig': {'literal': 0, 'indexed': 0, 'sizes': [], 'unique_values': set()}
         }
         self.total_frames = 0
         self.frames_with_jwt = 0
         self.unique_sessions = set()
-        self.header_name_indexing = {'x-jwt-payload': {'name_indexed': 0, 'name_literal': 0},
-                                      'x-jwt-sig': {'name_indexed': 0, 'name_literal': 0}}
+        self.header_name_indexing = {
+            'x-jwt-header': {'name_indexed': 0, 'name_literal': 0},
+            'x-jwt-payload': {'name_indexed': 0, 'name_literal': 0},
+            'x-jwt-sig': {'name_indexed': 0, 'name_literal': 0}
+        }
         # Track actual byte transmission for savings calculation
         self.byte_tracking = {
+            'x-jwt-header': {
+                'literal_bytes_sent': 0,
+                'indexed_references': 0,
+                'first_occurrences': 0,
+                'reused_from_table': 0,
+                'potential_bytes': 0,
+                'value_occurrences': {},
+            },
             'x-jwt-payload': {
-                'literal_bytes_sent': 0,       # Actual bytes sent as literal
-                'indexed_references': 0,        # Number of indexed references (1-2 bytes each)
-                'first_occurrences': 0,         # First time a value was seen (must be literal)
-                'reused_from_table': 0,         # Successfully reused from dynamic table
-                'potential_bytes': 0,           # What would have been sent without any HPACK
-                'value_occurrences': {},        # Track each value's occurrence count
+                'literal_bytes_sent': 0,
+                'indexed_references': 0,
+                'first_occurrences': 0,
+                'reused_from_table': 0,
+                'potential_bytes': 0,
+                'value_occurrences': {},
             },
             'x-jwt-sig': {
                 'literal_bytes_sent': 0,
@@ -48,25 +66,26 @@ class JWTHeaderAnalyzer:
             }
         }
         
-    def extract_grpc_headers(self):
-        """Extract HTTP/2 frames with JWT headers and their indexing info"""
+    def extract_headers_per_frame(self):
+        """Extract HTTP/2 headers one per line with frame info"""
         print(f"Analyzing pcap file: {self.pcap_file}")
-        print("Extracting HTTP/2 frames with JWT headers and indexing details...")
-        print("Looking for headers: x-jwt-payload, x-jwt-sig")
+        print("Extracting HTTP/2 headers individually...")
+        print("Looking for headers: x-jwt-header, x-jwt-payload, x-jwt-sig")
         
-        # Extract header names and their representation (indexed vs literal)
-        # Using http2 filter instead of grpc for better header capture
+        # Use a different approach: get each header as a separate entry
+        # This avoids the comma-separation issue
         cmd = [
             'tshark', '-r', self.pcap_file,
             '-d', 'tcp.port==7070,http2',
             '-Y', 'http2.header',
             '-T', 'fields',
             '-e', 'frame.number',
-            '-e', 'http2.streamid',
+            '-e', 'http2.streamid', 
             '-e', 'http2.header.name',
             '-e', 'http2.header.value',
             '-e', 'http2.header.repr',
-            '-E', 'separator=|'
+            '-E', 'separator=\t',
+            '-E', 'occurrence=a'  # Show all occurrences
         ]
         
         try:
@@ -76,161 +95,200 @@ class JWTHeaderAnalyzer:
             print(f"Error running tshark: {e}")
             return []
     
-    def parse_frame(self, frame_data):
-        """Parse a single frame's data"""
-        if not frame_data.strip():
-            return None
-            
-        parts = frame_data.split('|')
-        if len(parts) < 4:
-            return None
-            
-        frame_num = parts[0]
-        stream_ids = parts[1] if len(parts) > 1 else ""
-        header_names = parts[2] if len(parts) > 2 else ""
-        header_values = parts[3] if len(parts) > 3 else ""
-        representations = parts[4] if len(parts) > 4 else ""
+    def identify_header_type(self, header_name, header_value):
+        """Identify the JWT header type from name or value pattern"""
+        # If the name is known, use it
+        if header_name in ['x-jwt-header', 'x-jwt-payload', 'x-jwt-sig']:
+            return header_name
         
-        # Check if this frame contains our JWT headers (x-jwt-payload or x-jwt-sig)
-        if 'x-jwt-payload' not in header_names and 'x-jwt-sig' not in header_names:
-            return None
-            
-        return {
-            'frame_num': frame_num,
-            'stream_ids': stream_ids,
-            'header_names': header_names,
-            'header_values': header_values,
-            'representations': representations
-        }
-    
-    def extract_session_id(self, header_values):
-        """Extract session ID from x-jwt-payload (raw JSON)"""
-        # x-jwt-payload contains raw JSON like: {"session_id":"xxx",...}
-        match = re.search(r'"session_id"\s*:\s*"([a-f0-9-]+)"', header_values)
-        if match:
-            return match.group(1)
-        return None
-    
-    def extract_payload_from_values(self, header_names, header_values):
-        """Extract the x-jwt-payload value from header lists"""
-        names = [h.strip() for h in header_names.split(',')]
-        values = [v.strip() for v in header_values.split(',')]
+        # If name is <unknown> (indexed in HPACK), identify by value
+        if header_name == '<unknown>' or not header_name:
+            # x-jwt-header is always the constant
+            if header_value == JWT_HEADER_CONSTANT:
+                return 'x-jwt-header'
+            # x-jwt-payload is raw JSON with session_id
+            if header_value.startswith('{') and 'session_id' in header_value:
+                return 'x-jwt-payload'
+            # x-jwt-sig is a long base64url string
+            if len(header_value) > 100 and not header_value.startswith('{') and '.' not in header_value:
+                return 'x-jwt-sig'
         
-        for i, name in enumerate(names):
-            if name == 'x-jwt-payload' and i < len(values):
-                return values[i]
         return None
     
     def analyze(self):
         """Run the full analysis"""
-        frames = self.extract_grpc_headers()
+        lines = self.extract_headers_per_frame()
         
-        print(f"Processing {len(frames)} lines of output...")
+        print(f"Processing {len(lines)} lines of tshark output...")
         
-        frames_seen = set()
+        frames_with_jwt = set()
         
-        for frame_data in frames:
-            parsed = self.parse_frame(frame_data)
-            if not parsed:
+        for line in lines:
+            if not line.strip():
                 continue
             
-            frame_num = parsed['frame_num']
+            parts = line.split('\t')
+            if len(parts) < 5:
+                continue
             
-            # Track unique frames
-            frames_seen.add(frame_num)
+            frame_num = parts[0]
+            stream_id = parts[1]
+            header_names_str = parts[2]
+            header_values_str = parts[3]
+            representations_str = parts[4] if len(parts) > 4 else ""
             
-            # Split the comma-separated fields
-            header_names = [h.strip() for h in parsed['header_names'].split(',') if h.strip()]
-            header_values = [v.strip() for v in parsed['header_values'].split(',') if v.strip()]
-            representations = [r.strip() for r in parsed['representations'].split(',') if r.strip()]
+            # tshark with occurrence=a separates multiple values with commas
+            # But we need to be smarter about parsing JSON payloads
             
-            # Extract session ID from the payload
-            session_id = self.extract_session_id(parsed['header_values'])
-            if session_id:
-                self.unique_sessions.add(session_id)
+            # Split header names (these don't contain commas)
+            header_names = header_names_str.split(',')
             
-            # Check if frame has JWT headers
-            has_jwt = False
+            # Split representations (these don't contain commas)
+            representations = representations_str.split(',') if representations_str else []
             
-            # Analyze each header in this frame
+            # For values, we need to match them properly with names
+            # The trick is to match count of names with values
+            # JSON payloads contain commas, so simple split won't work
+            header_values = self._smart_split_values(header_values_str, len(header_names))
+            
+            # Process each header
             for i, header_name in enumerate(header_names):
-                # Only process our JWT headers
-                if header_name not in ['x-jwt-payload', 'x-jwt-sig']:
+                header_name = header_name.strip()
+                header_value = header_values[i].strip() if i < len(header_values) else ""
+                rep = representations[i].strip() if i < len(representations) else ""
+                
+                # Identify the header type
+                header_type = self.identify_header_type(header_name, header_value)
+                
+                if header_type is None:
                     continue
                 
-                has_jwt = True
+                # Mark this frame as having JWT
+                frames_with_jwt.add(frame_num)
                 
-                if header_name not in self.header_stats:
-                    continue
+                # Extract session ID from payload
+                if header_type == 'x-jwt-payload':
+                    match = re.search(r'"session_id"\s*:\s*"([a-f0-9-]+)"', header_value)
+                    if match:
+                        self.unique_sessions.add(match.group(1))
                 
-                # Track header value size
-                if i < len(header_values):
-                    value = header_values[i]
-                    self.header_stats[header_name]['sizes'].append(len(value))
-                    # Track unique values (hash for memory efficiency)
-                    import hashlib
-                    value_hash = hashlib.md5(value.encode()).hexdigest()[:16]
-                    self.header_stats[header_name]['unique_values'].add(value_hash)
+                # Track header stats
+                self.header_stats[header_type]['sizes'].append(len(header_value))
+                value_hash = hashlib.md5(header_value.encode()).hexdigest()[:16]
+                self.header_stats[header_type]['unique_values'].add(value_hash)
                 
-                # Check representation to determine if literal or indexed
-                rep = representations[i] if i < len(representations) else ""
+                # Determine if value is indexed or literal
+                # "Indexed Header Field" = both name and value from table
+                is_value_indexed = rep == 'Indexed Header Field'
                 
-                # HPACK representation types:
-                # "Indexed Header Field" = fully indexed (name + value from table)
-                # "Literal Header Field with Incremental Indexing" = name indexed, value literal, will be added to table
-                # "Literal Header Field without Indexing" = not added to table
-                # "Literal Header Field never Indexed" = sensitive, never indexed
+                # Determine if name is indexed or literal
+                # "Indexed Name" = name from table (dynamic or static)
+                # "New Name" = name sent literally (first time or not in table)
+                is_name_indexed = 'Indexed Name' in rep or rep == 'Indexed Header Field'
+                is_name_literal = 'New Name' in rep
                 
-                # Get value for byte tracking
-                value = header_values[i] if i < len(header_values) else ""
-                value_size = len(value)
-                name_size = len(header_name)
-                import hashlib
-                value_hash = hashlib.md5(value.encode()).hexdigest()[:16]
-                
-                # Track value occurrences
-                if value_hash not in self.byte_tracking[header_name]['value_occurrences']:
-                    self.byte_tracking[header_name]['value_occurrences'][value_hash] = 0
-                self.byte_tracking[header_name]['value_occurrences'][value_hash] += 1
-                occurrence_num = self.byte_tracking[header_name]['value_occurrences'][value_hash]
-                
-                # Potential bytes = what would be sent without HPACK (name + value + small overhead)
-                self.byte_tracking[header_name]['potential_bytes'] += name_size + value_size + 2
-                
-                if rep == 'Indexed Header Field':
-                    self.header_stats[header_name]['indexed'] += 1
-                    self.header_name_indexing[header_name]['name_indexed'] += 1
-                    # Indexed = only 1-2 bytes sent for the index reference
-                    self.byte_tracking[header_name]['indexed_references'] += 1
-                    self.byte_tracking[header_name]['reused_from_table'] += 1
-                elif 'Incremental Indexing' in rep:
-                    # Name might be indexed, value is literal but will be added to table
-                    self.header_stats[header_name]['literal'] += 1
-                    self.header_name_indexing[header_name]['name_indexed'] += 1
-                    # Literal with indexing = full value sent, but will be cached
-                    if occurrence_num == 1:
-                        self.byte_tracking[header_name]['first_occurrences'] += 1
-                    self.byte_tracking[header_name]['literal_bytes_sent'] += value_size + 2  # +2 for length prefix
-                elif 'Literal' in rep:
-                    self.header_stats[header_name]['literal'] += 1
-                    self.header_name_indexing[header_name]['name_literal'] += 1
-                    self.byte_tracking[header_name]['literal_bytes_sent'] += name_size + value_size + 2
+                if is_value_indexed:
+                    self.header_stats[header_type]['indexed'] += 1
                 else:
-                    # Unknown representation
-                    self.header_stats[header_name]['literal'] += 1
-                    self.header_name_indexing[header_name]['name_literal'] += 1
-                    self.byte_tracking[header_name]['literal_bytes_sent'] += name_size + value_size + 2
-            
-            if has_jwt:
-                self.frames_with_jwt += 1
+                    self.header_stats[header_type]['literal'] += 1
+                
+                if is_name_literal:
+                    self.header_name_indexing[header_type]['name_literal'] += 1
+                elif is_name_indexed:
+                    self.header_name_indexing[header_type]['name_indexed'] += 1
+                else:
+                    # Unknown representation, assume literal
+                    self.header_name_indexing[header_type]['name_literal'] += 1
+                
+                # Byte tracking
+                value_size = len(header_value)
+                name_size = len(header_type)  # Use actual name size
+                
+                if value_hash not in self.byte_tracking[header_type]['value_occurrences']:
+                    self.byte_tracking[header_type]['value_occurrences'][value_hash] = 0
+                self.byte_tracking[header_type]['value_occurrences'][value_hash] += 1
+                occurrence_num = self.byte_tracking[header_type]['value_occurrences'][value_hash]
+                
+                self.byte_tracking[header_type]['potential_bytes'] += name_size + value_size + 2
+                
+                if is_value_indexed:
+                    self.byte_tracking[header_type]['indexed_references'] += 1
+                    self.byte_tracking[header_type]['reused_from_table'] += 1
+                elif 'Incremental Indexing' in rep:
+                    if occurrence_num == 1:
+                        self.byte_tracking[header_type]['first_occurrences'] += 1
+                    # Name may or may not be indexed
+                    if is_name_literal:
+                        self.byte_tracking[header_type]['literal_bytes_sent'] += name_size + value_size + 2
+                    else:
+                        self.byte_tracking[header_type]['literal_bytes_sent'] += value_size + 2
+                else:
+                    self.byte_tracking[header_type]['literal_bytes_sent'] += name_size + value_size + 2
         
-        # Count unique frames
-        self.total_frames = len(frames_seen)
+        self.frames_with_jwt = len(frames_with_jwt)
+        self.total_frames = len(frames_with_jwt)
+    
+    def _smart_split_values(self, values_str, expected_count):
+        """
+        Smart split of header values that handles JSON with commas.
+        Uses pattern matching to identify different value types.
+        """
+        if not values_str:
+            return [''] * expected_count
+        
+        values = []
+        remaining = values_str
+        
+        while remaining and len(values) < expected_count:
+            remaining = remaining.strip()
+            
+            if remaining.startswith('{'):
+                # JSON object - find the matching closing brace
+                brace_count = 0
+                end_idx = 0
+                for i, c in enumerate(remaining):
+                    if c == '{':
+                        brace_count += 1
+                    elif c == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end_idx = i + 1
+                            break
+                
+                if end_idx > 0:
+                    values.append(remaining[:end_idx])
+                    remaining = remaining[end_idx:]
+                    if remaining.startswith(','):
+                        remaining = remaining[1:]
+                else:
+                    # Malformed JSON, take until comma
+                    if ',' in remaining:
+                        idx = remaining.index(',')
+                        values.append(remaining[:idx])
+                        remaining = remaining[idx+1:]
+                    else:
+                        values.append(remaining)
+                        remaining = ''
+            else:
+                # Non-JSON value - take until comma
+                if ',' in remaining:
+                    idx = remaining.index(',')
+                    values.append(remaining[:idx])
+                    remaining = remaining[idx+1:]
+                else:
+                    values.append(remaining)
+                    remaining = ''
+        
+        # Pad with empty strings if needed
+        while len(values) < expected_count:
+            values.append('')
+        
+        return values
     
     def print_report(self):
         """Print the analysis report"""
         print("\n" + "=" * 80)
-        print("JWT HEADER HPACK INDEXING ANALYSIS REPORT (2-Header Format)")
+        print("JWT HEADER HPACK INDEXING ANALYSIS REPORT (3-Header Format)")
         print("=" * 80)
         print(f"\nPcap File: {self.pcap_file}")
         print(f"Total Frames with JWT Headers: {self.frames_with_jwt}")
@@ -270,6 +328,13 @@ class JWTHeaderAnalyzer:
             overall_rate = 0.0
         print(f"{'TOTAL':<20} {total_uses_all:<10} {total_literal_all:<10} {total_indexed_all:<10} {overall_rate:>6.1f}%")
         
+        # Sanity check
+        totals = [self.header_stats[h]['literal'] + self.header_stats[h]['indexed'] 
+                  for h in ['x-jwt-header', 'x-jwt-payload', 'x-jwt-sig']]
+        if len(set(totals)) > 1:
+            print(f"\n⚠️  WARNING: Header totals don't match! {totals}")
+            print("    This may indicate parsing issues with the pcap data.")
+        
         print("\n" + "=" * 80)
         print("HPACK DYNAMIC TABLE ANALYSIS")
         print("=" * 80)
@@ -304,33 +369,35 @@ class JWTHeaderAnalyzer:
             print(f"{header:<20} {min_size:<12} {max_size:<12} {avg_size:<12.1f} {unique_count:<15}")
         
         # Estimate dynamic table usage
+        header_stats = self.header_stats.get('x-jwt-header', {})
         payload_stats = self.header_stats.get('x-jwt-payload', {})
         sig_stats = self.header_stats.get('x-jwt-sig', {})
         
+        header_sizes = header_stats.get('sizes', [])
         payload_sizes = payload_stats.get('sizes', [])
         sig_sizes = sig_stats.get('sizes', [])
         
         if payload_sizes and sig_sizes:
+            avg_header = sum(header_sizes) / len(header_sizes) if header_sizes else 36
             avg_payload = sum(payload_sizes) / len(payload_sizes)
             avg_sig = sum(sig_sizes) / len(sig_sizes)
             
-            # HPACK entry overhead: 32 bytes per entry
             entry_overhead = 32
+            header_entry_size = avg_header + len('x-jwt-header') + entry_overhead
             payload_entry_size = avg_payload + len('x-jwt-payload') + entry_overhead
             sig_entry_size = avg_sig + len('x-jwt-sig') + entry_overhead
-            total_entry_size = payload_entry_size + sig_entry_size
+            total_entry_size = header_entry_size + payload_entry_size + sig_entry_size
             
             print(f"\nEstimated HPACK Dynamic Table Entry Sizes:")
+            print(f"  • x-jwt-header entry: ~{header_entry_size:.0f} bytes (value={avg_header:.0f} + name=12 + overhead=32)")
             print(f"  • x-jwt-payload entry: ~{payload_entry_size:.0f} bytes (value={avg_payload:.0f} + name=13 + overhead=32)")
             print(f"  • x-jwt-sig entry: ~{sig_entry_size:.0f} bytes (value={avg_sig:.0f} + name=9 + overhead=32)")
             print(f"  • Total per request: ~{total_entry_size:.0f} bytes")
             
-            # With default 4KB table
             default_table_size = 4096
             entries_in_default = default_table_size / total_entry_size
             print(f"\n  With default 4KB table: ~{entries_in_default:.1f} user entries fit")
             
-            # With 512KB table
             large_table_size = 512 * 1024
             entries_in_large = large_table_size / total_entry_size
             print(f"  With 512KB table: ~{entries_in_large:.0f} user entries fit")
@@ -354,7 +421,6 @@ class JWTHeaderAnalyzer:
             potential = bt['potential_bytes']
             literal_sent = bt['literal_bytes_sent']
             indexed_refs = bt['indexed_references']
-            # Indexed references are ~2 bytes each
             indexed_bytes = indexed_refs * 2
             actual_sent = literal_sent + indexed_bytes
             saved = potential - actual_sent
@@ -395,26 +461,23 @@ class JWTHeaderAnalyzer:
                 print(f"    • Value reuse rate: {reuse_rate:.1f}% ({total_occurrences - unique_values} reuses of {total_occurrences} total)")
             
             if reused > 0 and total_occurrences > first_occ:
-                # Calculate how many potential reuses actually hit the cache
                 potential_reuses = total_occurrences - first_occ
                 if potential_reuses > 0:
                     hit_rate = reused / potential_reuses * 100
                     print(f"    • Cache hit rate: {hit_rate:.1f}% ({reused} hits of {potential_reuses} potential reuses)")
             
-            # Show eviction analysis
             evicted_reuses = (total_occurrences - unique_values) - reused
             if evicted_reuses > 0:
                 print(f"    • Evicted before reuse: {evicted_reuses} (value was in table but got evicted)")
-        
 
 
 def main():
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python analyze_jwt_header_indexing.py <pcap_file>")
+        print("Usage: python analyze_jwt_header_indexing_v2.py <pcap_file>")
         print("\nExample:")
-        print("  python analyze_jwt_header_indexing.py jwt-compression-results-on-400-256kb-wsl-longduration-20251022_073455/frontend-cart-traffic.pcap")
+        print("  python analyze_jwt_header_indexing_v2.py jwt-compression-400-on-results-20251205_074543/frontend-cart-traffic.pcap")
         sys.exit(1)
     
     pcap_file = sys.argv[1]
