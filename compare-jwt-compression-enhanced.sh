@@ -4,8 +4,8 @@
 # Compares performance and network metrics between JWT compression ON and OFF
 #
 
-ENABLED_DIR="jwt-compression-400-on-codepsaces-results-20251205_172135"
-DISABLED_DIR="jwt-compression-400-off-codespaces-results-20251205_173032"
+ENABLED_DIR="jwt-compression-results-on-400-new-20251206_170235"
+DISABLED_DIR="jwt-compression-results-off-400-new-20251206_173231"
 
 # Colors for output
 RED='\033[0;31m'
@@ -259,6 +259,191 @@ else
             echo ""
         fi
     fi
+fi
+
+# ====================================================================
+# gRPC Latency Analysis (Frontend ↔ CartService)
+# ====================================================================
+echo -e "${BLUE}======================================================================"
+echo "  gRPC Latency Analysis (Frontend ↔ CartService)"
+echo -e "======================================================================${NC}"
+echo ""
+
+analyze_grpc_latency() {
+    local PCAP=$1
+    local LABEL=$2
+    
+    if [ ! -f "$PCAP" ]; then
+        echo -e "${RED}  ✗ $LABEL: PCAP file not found${NC}"
+        return 1
+    fi
+    
+    echo -e "${CYAN}--- $LABEL ---${NC}"
+    
+    # Create temporary file for stream analysis
+    local TMPFILE=$(mktemp)
+    local LATENCIES_FILE=$(mktemp)
+    
+    # Extract HTTP/2 streams with TCP stream ID
+    # Use -Eseparator with tab, and occurrence=a to get all values
+    tshark -r "${PCAP}" -d tcp.port==7070,http2 \
+        -Y 'http2.streamid > 0' \
+        -T fields \
+        -e frame.time_relative \
+        -e tcp.stream \
+        -e http2.streamid \
+        -E separator='	' \
+        -E occurrence=f 2>/dev/null > "$TMPFILE"
+    
+    # Process to calculate per-stream latency
+    # Each line has: time \t tcp_stream \t h2_stream (first occurrence only)
+    awk -F'\t' '
+    {
+        time = $1
+        tcp_stream = $2
+        h2_stream = $3
+        
+        if (h2_stream == "" || h2_stream == "0" || h2_stream ~ /,/) next
+        
+        # Unique key: TCP connection + HTTP/2 stream
+        key = tcp_stream "-" h2_stream
+        
+        # Record first time for each stream
+        if (!(key in first_time)) {
+            first_time[key] = time
+        }
+        
+        # Track last time seen
+        last_time[key] = time
+        
+        # Count frames per stream
+        frame_count[key]++
+    }
+    END {
+        for (k in first_time) {
+            # Only count streams with multiple frames (request + response)
+            if (frame_count[k] >= 2) {
+                latency_ms = (last_time[k] - first_time[k]) * 1000
+                # Filter reasonable latencies (0.001ms to 5000ms)
+                if (latency_ms >= 0.001 && latency_ms < 5000) {
+                    print latency_ms
+                }
+            }
+        }
+    }
+    ' "$TMPFILE" > "$LATENCIES_FILE"
+    
+    # Calculate statistics
+    local COUNT=$(wc -l < "$LATENCIES_FILE" | tr -d ' ')
+    
+    if [ "$COUNT" -gt 0 ]; then
+        # Sort latencies for percentile calculation
+        sort -n "$LATENCIES_FILE" > "${LATENCIES_FILE}.sorted"
+        
+        # Calculate avg, p50, p95, p99
+        local AVG=$(awk '{sum+=$1} END {printf "%.3f", sum/NR}' "$LATENCIES_FILE")
+        local MIN=$(head -1 "${LATENCIES_FILE}.sorted")
+        local MAX=$(tail -1 "${LATENCIES_FILE}.sorted")
+        
+        # P50 (median)
+        local P50_IDX=$(awk "BEGIN {printf \"%.0f\", $COUNT * 0.50}")
+        [ "$P50_IDX" -lt 1 ] && P50_IDX=1
+        local P50=$(sed -n "${P50_IDX}p" "${LATENCIES_FILE}.sorted")
+        
+        # P95
+        local P95_IDX=$(awk "BEGIN {printf \"%.0f\", $COUNT * 0.95}")
+        [ "$P95_IDX" -lt 1 ] && P95_IDX=1
+        local P95=$(sed -n "${P95_IDX}p" "${LATENCIES_FILE}.sorted")
+        
+        # P99
+        local P99_IDX=$(awk "BEGIN {printf \"%.0f\", $COUNT * 0.99}")
+        [ "$P99_IDX" -lt 1 ] && P99_IDX=1
+        local P99=$(sed -n "${P99_IDX}p" "${LATENCIES_FILE}.sorted")
+        
+        echo "  gRPC streams analyzed: ${COUNT}"
+        echo "  Latency (request → response):"
+        echo "    Min:     $(printf '%.3f' $MIN) ms"
+        echo "    Avg:     ${AVG} ms"
+        echo "    P50:     $(printf '%.3f' $P50) ms"
+        echo "    P95:     $(printf '%.3f' $P95) ms"
+        echo "    P99:     $(printf '%.3f' $P99) ms"
+        echo "    Max:     $(printf '%.3f' $MAX) ms"
+        echo ""
+        
+        # Store for comparison
+        eval "${LABEL}_GRPC_COUNT=$COUNT"
+        eval "${LABEL}_GRPC_AVG=$AVG"
+        eval "${LABEL}_GRPC_P50=$P50"
+        eval "${LABEL}_GRPC_P95=$P95"
+        eval "${LABEL}_GRPC_P99=$P99"
+        eval "${LABEL}_GRPC_MIN=$MIN"
+        eval "${LABEL}_GRPC_MAX=$MAX"
+        
+        rm -f "${LATENCIES_FILE}.sorted"
+    else
+        echo "  No complete gRPC streams found in capture"
+        echo ""
+    fi
+    
+    rm -f "$TMPFILE" "$LATENCIES_FILE"
+}
+
+if [ -f "$ENABLED_PCAP" ] && [ -f "$DISABLED_PCAP" ] && command -v tshark &> /dev/null; then
+    analyze_grpc_latency "$ENABLED_PCAP" "ENABLED"
+    analyze_grpc_latency "$DISABLED_PCAP" "DISABLED"
+    
+    # Compare latencies
+    if [ ! -z "$ENABLED_GRPC_AVG" ] && [ ! -z "$DISABLED_GRPC_AVG" ]; then
+        echo -e "${GREEN}gRPC Latency Comparison (Frontend → CartService):${NC}"
+        echo ""
+        
+        AVG_DIFF=$(awk "BEGIN {printf \"%.3f\", $DISABLED_GRPC_AVG - $ENABLED_GRPC_AVG}")
+        P50_DIFF=$(awk "BEGIN {printf \"%.3f\", $DISABLED_GRPC_P50 - $ENABLED_GRPC_P50}")
+        P95_DIFF=$(awk "BEGIN {printf \"%.3f\", $DISABLED_GRPC_P95 - $ENABLED_GRPC_P95}")
+        P99_DIFF=$(awk "BEGIN {printf \"%.3f\", $DISABLED_GRPC_P99 - $ENABLED_GRPC_P99}")
+        
+        printf "  %-12s %12s %12s %12s\n" "Metric" "Compression ON" "Compression OFF" "Difference"
+        printf "  %-12s %12s %12s %12s\n" "------" "--------------" "---------------" "----------"
+        printf "  %-12s %11.3f ms %11.3f ms " "Avg" "$ENABLED_GRPC_AVG" "$DISABLED_GRPC_AVG"
+        if (( $(awk "BEGIN {print ($AVG_DIFF > 0)}") )); then
+            echo -e "${GREEN}${AVG_DIFF} ms faster${NC}"
+        elif (( $(awk "BEGIN {print ($AVG_DIFF < 0)}") )); then
+            echo -e "${YELLOW}$(awk "BEGIN {printf \"%.3f\", -1*$AVG_DIFF}") ms slower${NC}"
+        else
+            echo "no change"
+        fi
+        
+        printf "  %-12s %11.3f ms %11.3f ms " "P50" "$ENABLED_GRPC_P50" "$DISABLED_GRPC_P50"
+        if (( $(awk "BEGIN {print ($P50_DIFF > 0)}") )); then
+            echo -e "${GREEN}${P50_DIFF} ms faster${NC}"
+        elif (( $(awk "BEGIN {print ($P50_DIFF < 0)}") )); then
+            echo -e "${YELLOW}$(awk "BEGIN {printf \"%.3f\", -1*$P50_DIFF}") ms slower${NC}"
+        else
+            echo "no change"
+        fi
+        
+        printf "  %-12s %11.3f ms %11.3f ms " "P95" "$ENABLED_GRPC_P95" "$DISABLED_GRPC_P95"
+        if (( $(awk "BEGIN {print ($P95_DIFF > 0)}") )); then
+            echo -e "${GREEN}${P95_DIFF} ms faster${NC}"
+        elif (( $(awk "BEGIN {print ($P95_DIFF < 0)}") )); then
+            echo -e "${YELLOW}$(awk "BEGIN {printf \"%.3f\", -1*$P95_DIFF}") ms slower${NC}"
+        else
+            echo "no change"
+        fi
+        
+        printf "  %-12s %11.3f ms %11.3f ms " "P99" "$ENABLED_GRPC_P99" "$DISABLED_GRPC_P99"
+        if (( $(awk "BEGIN {print ($P99_DIFF > 0)}") )); then
+            echo -e "${GREEN}${P99_DIFF} ms faster${NC}"
+        elif (( $(awk "BEGIN {print ($P99_DIFF < 0)}") )); then
+            echo -e "${YELLOW}$(awk "BEGIN {printf \"%.3f\", -1*$P99_DIFF}") ms slower${NC}"
+        else
+            echo "no change"
+        fi
+        echo ""
+    fi
+else
+    echo -e "${YELLOW}⚠ PCAP files or tshark not available for latency analysis${NC}"
+    echo ""
 fi
 
 # ====================================================================

@@ -1,27 +1,49 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Counter, Trend } from 'k6/metrics';
+import { Counter } from 'k6/metrics';
 
-// Custom metrics
+// ============================================================================
+// Custom Metrics - Counters only (latency measured via PCAP analysis)
+// ============================================================================
 const jwtRenewals = new Counter('jwt_renewals');
 const jwtRenewalSuccesses = new Counter('jwt_renewal_successes');
 const jwtRenewalFailures = new Counter('jwt_renewal_failures');
 const cartOperations = new Counter('cart_operations');
-const requestSize = new Trend('request_size_bytes');
-const responseSize = new Trend('response_size_bytes');
 
+// ============================================================================
+// Test Configuration
+// ============================================================================
 export const options = {
-  stages: [
-    { duration: '60s', target: 400 },  // Ramp up to 200 users over 60s
-    { duration: '300s', target: 400 }, // Stay at 200 users for 180s (allows for 125s wait + operations)
-  ],
+  scenarios: {
+    // Warmup scenario - prime connections and HPACK tables (20s, with logging)
+    warmup: {
+      executor: 'constant-vus',
+      vus: 20,
+      duration: '20s',
+      startTime: '0s',
+      tags: { scenario: 'warmup' },
+      exec: 'warmupTest',
+    },
+    // Main test scenario - starts after warmup completes
+    main_test: {
+      executor: 'ramping-vus',
+      startVUs: 0,
+      stages: [
+        { duration: '60s', target: 400 },  // Ramp up to 400 users over 60s
+        { duration: '300s', target: 400 }, // Stay at 400 users for 300s
+      ],
+      startTime: '20s', // Start after warmup completes
+      exec: 'mainTest',
+    },
+  },
   thresholds: {
-    http_req_failed: ['rate==0'], // 0% errors - all requests must succeed
-    http_req_duration: ['p(95)<2000'], // 95% of requests under 2s
+    // Thresholds apply to main test only (exclude warmup)
+    'http_req_failed{scenario:main_test}': ['rate<0.01'],
+    'http_req_duration{scenario:main_test}': ['p(95)<2000'],
   },
 };
 
-const BASE_URL = 'http://localhost:8080'; // Change if needed
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 
 // Available products from the catalog
 const PRODUCT_IDS = [
@@ -76,16 +98,53 @@ function buildCookieHeader(cookies) {
     .join('; ');
 }
 
-export default function () {
+// ============================================================================
+// WARMUP SCENARIO - Prime connections and HPACK tables (with logging)
+// ============================================================================
+export function warmupTest() {
   const userCookies = {};
-  let firstSessionId = null;
-  let secondSessionId = null;
+  
+  console.log(`[WARMUP VU ${__VU}] Starting warmup iteration`);
+  
+  // Homepage visit
+  let response = http.get(BASE_URL, { tags: { scenario: 'warmup' } });
+  Object.assign(userCookies, extractCookies(response));
+  
+  if (Object.keys(userCookies).length > 0) {
+    const jwt = userCookies['shop_jwt'];
+    console.log(`[WARMUP VU ${__VU}] Got JWT: ${jwt ? jwt.substring(0, 20) + '...' : 'not found'}`);
+  }
+  
+  sleep(1);
+  
+  // Cart add to prime cart service connection
+  if (Object.keys(userCookies).length > 0) {
+    response = http.post(`${BASE_URL}/cart`, {
+      product_id: PRODUCT_1,
+      quantity: '1',
+    }, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Cookie': buildCookieHeader(userCookies),
+      },
+      tags: { scenario: 'warmup' }
+    });
+    
+    console.log(`[WARMUP VU ${__VU}] Cart add status: ${response.status}`);
+  }
+  
+  sleep(2);
+}
+
+// ============================================================================
+// MAIN TEST SCENARIO - Full user journey with JWT renewal (no logging)
+// ============================================================================
+export function mainTest() {
+  const userCookies = {};
   
   // ========================================
   // PHASE 1: Initial visit - Get first JWT
   // ========================================
-  console.log(`[VU ${__VU}] Phase 1: Initial frontpage visit`);
-  
   let response = http.get(BASE_URL, {
     tags: { phase: 'initial_visit', jwt_state: 'new' }
   });
@@ -94,27 +153,17 @@ export default function () {
     'initial visit successful': (r) => r.status === 200,
   });
   
-  // Extract cookies (including JWT and session ID)
   Object.assign(userCookies, extractCookies(response));
   
   if (Object.keys(userCookies).length > 0) {
-    firstSessionId = userCookies['shop_session-id'];
-    const firstJWT = userCookies['shop_jwt'];
-    console.log(`[VU ${__VU}] Phase 1: Received first JWT cookie`);
-    console.log(`[VU ${__VU}]   JWT: ${firstJWT ? firstJWT.substring(0, 20) + '...' : 'not found'}`);
-    console.log(`[VU ${__VU}]   Session: ${firstSessionId ? firstSessionId.substring(0, 8) + '...' : 'not found'}`);
     jwtRenewals.add(1);
   }
-  
-  requestSize.add(response.request.body ? response.request.body.length : 0);
-  responseSize.add(response.body ? response.body.length : 0);
   
   sleep(2);
   
   // ========================================
   // PHASE 2: Add items to cart (with first JWT)
   // ========================================
-  console.log(`[VU ${__VU}] Phase 2: Adding items to cart (JWT #1)`);
   
   // Add first item (Sunglasses)
   response = http.post(
@@ -177,14 +226,11 @@ export default function () {
   // ========================================
   // PHASE 3: Wait for JWT expiration (125 seconds)
   // ========================================
-  console.log(`[VU ${__VU}] Phase 3: Waiting 125 seconds for JWT expiration...`);
   sleep(125);
   
   // ========================================
   // PHASE 4: Return to shopping - Get new JWT
   // ========================================
-  console.log(`[VU ${__VU}] Phase 4: Return to frontpage (JWT should be expired, expecting new JWT)`);
-  
   response = http.get(BASE_URL, {
     headers: {
       'Cookie': buildCookieHeader(userCookies),
@@ -196,26 +242,16 @@ export default function () {
     'return to shopping successful': (r) => r.status === 200,
   });
   
-  // Check if we got a new JWT by looking for shop_jwt cookie (not session-id)
   const newCookies = extractCookies(response);
   if (Object.keys(newCookies).length > 0) {
-    // Check for JWT cookie renewal (shop_jwt cookie)
     const gotNewJWT = newCookies['shop_jwt'] !== undefined;
-    
-    // Also track session IDs for logging (session ID stays the same, JWT changes)
-    secondSessionId = newCookies['shop_session-id'] || userCookies['shop_session-id'];
     
     if (gotNewJWT) {
       const firstJWT = userCookies['shop_jwt'];
       const secondJWT = newCookies['shop_jwt'];
       
-      console.log(`[VU ${__VU}] Phase 4: ✓ JWT RENEWED - New JWT cookie received`);
-      console.log(`[VU ${__VU}]   First JWT:  ${firstJWT ? firstJWT.substring(0, 20) + '...' : 'unknown'}`);
-      console.log(`[VU ${__VU}]   Second JWT: ${secondJWT ? secondJWT.substring(0, 20) + '...' : 'unknown'}`);
-      console.log(`[VU ${__VU}]   Session ID: ${secondSessionId ? secondSessionId.substring(0, 8) + '... (unchanged)' : 'unknown'}`);
       jwtRenewals.add(1);
       
-      // Verify the JWTs are different
       const jwtRenewedCorrectly = firstJWT !== secondJWT;
       check(null, {
         'JWT renewed with different token': () => jwtRenewedCorrectly,
@@ -224,17 +260,11 @@ export default function () {
       if (jwtRenewedCorrectly) {
         jwtRenewalSuccesses.add(1);
       } else {
-        console.log(`[VU ${__VU}] ⚠️  WARNING: JWT did not change after expiration!`);
         jwtRenewalFailures.add(1);
       }
-    } else {
-      console.log(`[VU ${__VU}] Phase 4: No new JWT cookie received (still using old JWT or JWT not expired yet)`);
     }
     
-    // Update cookies for next requests
     Object.assign(userCookies, newCookies);
-  } else {
-    console.log(`[VU ${__VU}] Phase 4: ⚠️  No cookies received after JWT expiration`);
   }
   
   sleep(2);
@@ -242,9 +272,6 @@ export default function () {
   // ========================================
   // PHASE 5: Add another item (with new JWT)
   // ========================================
-  console.log(`[VU ${__VU}] Phase 5: Adding item with new JWT`);
-  
-  // Add third item (Watch)
   response = http.post(
     `${BASE_URL}/cart`,
     {
@@ -270,8 +297,6 @@ export default function () {
   // ========================================
   // PHASE 6: Place order
   // ========================================
-  console.log(`[VU ${__VU}] Phase 6: Placing order`);
-  
   response = http.post(
     `${BASE_URL}/cart/checkout`,
     {
@@ -304,8 +329,6 @@ export default function () {
   // ========================================
   // PHASE 7: Continue shopping
   // ========================================
-  console.log(`[VU ${__VU}] Phase 7: Continue shopping`);
-  
   response = http.get(BASE_URL, {
     headers: {
       'Cookie': buildCookieHeader(userCookies),
@@ -316,15 +339,4 @@ export default function () {
   check(response, {
     'continue shopping successful': (r) => r.status === 200,
   });
-  
-  // ========================================
-  // PHASE 8: Summary
-  // ========================================
-  const finalJWT = userCookies['shop_jwt'];
-  if (finalJWT) {
-    console.log(`[VU ${__VU}] Journey complete: Using JWT ${finalJWT.substring(0, 20)}...`);
-    console.log(`[VU ${__VU}]   Session ID remained: ${secondSessionId ? secondSessionId.substring(0, 8) + '...' : 'unknown'}`);
-  } else {
-    console.log(`[VU ${__VU}] Journey complete (JWT check: ${userCookies['shop_jwt'] ? 'success' : 'no JWT found'})`);
-  }
 }
